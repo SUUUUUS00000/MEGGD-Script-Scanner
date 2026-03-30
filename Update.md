@@ -1,8 +1,8 @@
-#Script Version 1.0.0
+##Script Version 1.0.0
 
 - The script has been created!
 
-#Script Scanner Update to 1.10
+##Script Scanner Update to 1.10
 
 + Added a filter when searching for the number of matches.
 + Added a warning about unsupported required features.
