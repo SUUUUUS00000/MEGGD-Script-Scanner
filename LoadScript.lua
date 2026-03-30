@@ -7,3 +7,4 @@ if is_mobile then
 else
     loadstring(game:HttpGet("https://raw.githubusercontent.com/SUUUUUS00000/MEGGD-Script-Scanner/refs/heads/main/Device/MEGGD%20Script%20Scanner(PC).lua", true))()
 end
+print("Loading...")
