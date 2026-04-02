@@ -2,7 +2,7 @@
 
 - The script has been created!
 
-# Script Scanner Update to 1.1.5
+# Script Scanner Update to 1.1.0
 
 + Added a filter when searching for the number of matches.
 + Added a warning about unsupported required features.
