@@ -45,6 +45,7 @@ local current_theme = themes.vscode
 local flat_image = "rbxassetid://2790382281"
 local decompile_cache = {}
 local button_colors = {}
+local active_search_terms = {}
 
 local function create_instance(class_name, properties)
     local instance = Instance.new(class_name)
@@ -274,7 +275,7 @@ local version_text = create_instance("TextLabel", {
     Position = UDim2.new(0, 64, 0, 7),
     Size = UDim2.new(0, 52, 0, 14),
     Font = Enum.Font.Arcade,
-    Text = "V1.1.0",
+    Text = "V1.1.5",
     TextColor3 = Color3.fromRGB(160, 205, 230),
     TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -635,7 +636,8 @@ local line_numbers_scroll = create_instance("ScrollingFrame", {
     CanvasSize = UDim2.new(0, 0, 0, 0),
     ScrollBarThickness = 0,
     ScrollingDirection = Enum.ScrollingDirection.Y,
-    ElasticBehavior = Enum.ElasticBehavior.Never
+    ElasticBehavior = Enum.ElasticBehavior.Never,
+    ScrollingEnabled = false
 })
 
 local line_numbers_layout = create_instance("UIListLayout", {
@@ -668,7 +670,7 @@ local code_layout = create_instance("UIListLayout", {
 code_layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
     local max_width = 0
     for _, child in ipairs(code_scroll:GetChildren()) do
-        if child:IsA("TextLabel") and child.AbsoluteSize.X > max_width then
+        if child:IsA("Frame") and child.AbsoluteSize.X > max_width then
             max_width = child.AbsoluteSize.X
         end
     end
@@ -833,7 +835,13 @@ local function apply_theme(theme_name)
         if child:IsA("TextLabel") then child.TextColor3 = Color3.fromRGB(150, 150, 150) end
     end
     for _, child in ipairs(code_scroll:GetChildren()) do
-        if child:IsA("TextLabel") then child.TextColor3 = current_theme.text end
+        if child:IsA("Frame") then
+            for _, label in ipairs(child:GetChildren()) do
+                if label:IsA("TextLabel") and label.ZIndex == 2 then
+                    label.TextColor3 = current_theme.text
+                end
+            end
+        end
     end
     
     for _, fr in ipairs(icon_search:GetChildren()) do fr.BackgroundColor3 = current_theme.text end
@@ -895,22 +903,25 @@ bind_tap(hide_button, function()
 end)
 
 local is_dragging_floating = false
+local floating_max_dist = 0
 local floating_drag_start_pos
 local floating_start_pos
-local floating_click_start
 
 floating_hide.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
         is_dragging_floating = true
+        floating_max_dist = 0
         floating_drag_start_pos = input.Position
         floating_start_pos = UDim2.new(0, floating_hide.AbsolutePosition.X, 0, floating_hide.AbsolutePosition.Y)
-        floating_click_start = input.Position
     end
 end)
 
 user_input_service.InputChanged:Connect(function(input)
     if is_dragging_floating and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
         local delta = input.Position - floating_drag_start_pos
+        if delta.Magnitude > floating_max_dist then
+            floating_max_dist = delta.Magnitude
+        end
         local nx, ny = clamp_pos(floating_start_pos.X.Offset + delta.X, floating_start_pos.Y.Offset + delta.Y, floating_hide.AbsoluteSize.X, floating_hide.AbsoluteSize.Y)
         floating_hide.Position = UDim2.new(0, nx, 0, ny)
     end
@@ -920,7 +931,7 @@ user_input_service.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
         if is_dragging_floating then
             is_dragging_floating = false
-            if floating_click_start and (input.Position - floating_click_start).Magnitude < 10 then
+            if floating_max_dist < 2 then
                 if is_collapsed then
                     is_collapsed = false
                     
@@ -962,6 +973,12 @@ local function escape_pattern(text)
     return text:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
 end
 
+local function case_insensitive_pattern(pattern)
+    return pattern:gsub("(%a)", function(v)
+        return "[" .. v:upper() .. v:lower() .. "]"
+    end)
+end
+
 local function syntax_highlight(text)
     local highlighted = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
     local patterns = {
@@ -992,7 +1009,7 @@ local function view_code(script_instance)
     lines_info.Text = "DECOMPILING..."
     
     for _, child in ipairs(code_scroll:GetChildren()) do
-        if child:IsA("TextLabel") then child:Destroy() end
+        if child:IsA("Frame") then child:Destroy() end
     end
     for _, child in ipairs(line_numbers_scroll:GetChildren()) do
         if child:IsA("TextLabel") then child:Destroy() end
@@ -1024,6 +1041,7 @@ local function view_code(script_instance)
         lines_info.Text = "LINES: " .. tostring(lines_count)
         
         local chunk_size = 50
+        local line_height = text_service:GetTextSize("A", 14, Enum.Font.Arcade, Vector2.new(100000, 100000)).Y
         
         for i = 1, lines_count, chunk_size do
             local chunk_lines = {}
@@ -1050,8 +1068,50 @@ local function view_code(script_instance)
                 TextYAlignment = Enum.TextYAlignment.Top
             })
             
-            create_instance("TextLabel", {
+            local chunk_frame = create_instance("Frame", {
                 Parent = code_scroll,
+                BackgroundTransparency = 1,
+                AutomaticSize = Enum.AutomaticSize.XY,
+                Size = UDim2.new(0, 0, 0, 0)
+            })
+
+            if active_search_terms and #active_search_terms > 0 then
+                for k, line_text in ipairs(chunk_lines) do
+                    for _, term in ipairs(active_search_terms) do
+                        local pattern = case_insensitive_pattern(escape_pattern(term))
+                        local init = 1
+                        while true do
+                            local match_start, match_end = string.find(line_text, pattern, init)
+                            if not match_start then break end
+                            
+                            local prefix_text = string.sub(line_text, 1, match_start - 1)
+                            local matched_part = string.sub(line_text, match_start, match_end)
+                            
+                            local x_offset = 0
+                            if #prefix_text > 0 then
+                                x_offset = text_service:GetTextSize(prefix_text, 14, Enum.Font.Arcade, Vector2.new(100000, 100000)).X
+                            end
+                            
+                            local match_width = text_service:GetTextSize(matched_part, 14, Enum.Font.Arcade, Vector2.new(100000, 100000)).X
+                            
+                            create_instance("Frame", {
+                                Parent = chunk_frame,
+                                BackgroundColor3 = Color3.fromRGB(80, 130, 90),
+                                BackgroundTransparency = 0.5,
+                                BorderSizePixel = 0,
+                                Position = UDim2.new(0, x_offset, 0, (k - 1) * line_height),
+                                Size = UDim2.new(0, match_width, 0, line_height),
+                                ZIndex = 1
+                            })
+                            
+                            init = match_end + 1
+                        end
+                    end
+                end
+            end
+            
+            create_instance("TextLabel", {
+                Parent = chunk_frame,
                 BackgroundTransparency = 1,
                 AutomaticSize = Enum.AutomaticSize.XY,
                 Size = UDim2.new(0, 0, 0, 0),
@@ -1062,7 +1122,8 @@ local function view_code(script_instance)
                 TextXAlignment = Enum.TextXAlignment.Left,
                 TextYAlignment = Enum.TextYAlignment.Top,
                 RichText = true,
-                TextWrapped = false
+                TextWrapped = false,
+                ZIndex = 2
             })
         end
     end)
@@ -1098,7 +1159,10 @@ local function perform_search()
     end
     results_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     local raw_query = search_box.Text
-    if raw_query == "" then return end
+    if raw_query == "" then 
+        active_search_terms = {}
+        return 
+    end
 
     local terms = {}
     for term in raw_query:gmatch("[^,]+") do
@@ -1108,8 +1172,12 @@ local function perform_search()
             if #terms >= 25 then break end
         end
     end
-    if #terms == 0 then return end
+    if #terms == 0 then 
+        active_search_terms = {}
+        return 
+    end
 
+    active_search_terms = terms
     set_search_state("loading")
 
     search_thread = task.spawn(function()
@@ -1297,6 +1365,10 @@ local function perform_search()
 end
 
 bind_tap(search_button, function()
+    if code_view_container.Visible then
+        code_view_container.Visible = false
+        results_scroll.Visible = true
+    end
     perform_search()
 end)
 
