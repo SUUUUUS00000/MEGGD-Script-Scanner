@@ -2,7 +2,7 @@
 
 - The script has been created!
 
-# Script Scanner Update to 1.10
+# Script Scanner Update to 1.1.5
 
 + Added a filter when searching for the number of matches.
 + Added a warning about unsupported required features.
@@ -10,3 +10,9 @@
 + A feature has been added that allows you to search for various scripts with multiple matching terms. Example: "GetMouse, FireServer".
 + Added a button to hide the interface.
 + The `clamp_pos` function has been changed to prevent the GUI from going beyond the screen/monitor boundaries.
+
+# Script Scanner Update to 1.1.5
+
++ Fixed a bug with the hide button (it incorrectly detected the release of a finger/mouse).
++ Fixed line scrolling bug.
++ Added highlighting of matches.
