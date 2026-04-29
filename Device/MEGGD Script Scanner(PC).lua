@@ -46,6 +46,7 @@ local flat_image = "rbxassetid://2790382281"
 local decompile_cache = {}
 local button_colors = {}
 local active_search_terms = {}
+local http_request = request or http_request or (http and http.request)
 
 local function create_instance(class_name, properties)
     local instance = Instance.new(class_name)
@@ -140,7 +141,8 @@ task.spawn(function()
 end)
 
 local missing_funcs = {}
-if not decompile then table.insert(missing_funcs, "decompile") end
+if not getscriptbytecode then table.insert(missing_funcs, "getscriptbytecode") end
+if not http_request then table.insert(missing_funcs, "request") end
 if not getscripthash then table.insert(missing_funcs, "getscripthash") end
 if not getscripts then table.insert(missing_funcs, "getscripts") end
 if not getnilinstances then table.insert(missing_funcs, "getnilinstances") end
@@ -240,6 +242,54 @@ if #missing_funcs > 0 then
     end
 end
 
+local base64_encoder = (crypt and crypt.base64encode) or function(data)
+    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    return ((data:gsub('.', function(x)
+        local r, byte = '', x:byte()
+        for i = 8, 1, -1 do
+            r = r .. (byte % 2^i - byte % 2^(i-1) > 0 and '1' or '0')
+        end
+        return r
+    end)..'0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
+        if #x < 6 then return '' end
+        local c = 0
+        for i = 1, 6 do
+            c = c + (x:sub(i, i) == '1' and 2^(6-i) or 0)
+        end
+        return b:sub(c+1, c+1)
+    end)..({ '', '==', '=' })[#data % 3 + 1])
+end
+
+getgenv().api_decompile = function(scr)
+    if not getscriptbytecode then return "-- getscriptbytecode not supported" end
+    if not http_request then return "-- http requests not supported" end
+
+    local ok, bytecode = pcall(getscriptbytecode, scr)
+    if not ok then
+        return "-- failed to read script bytecode\n--[[\n" .. tostring(bytecode) .. "\n--]]"
+    end
+
+    local res = http_request({
+        Url = "https://api.lua.expert/decompile",
+        Method = "POST",
+        Headers = {
+            ["content-type"] = "application/json"
+        },
+        Body = game:GetService("HttpService"):JSONEncode({
+            script = base64_encoder(bytecode)
+        })
+    })
+
+    if not res or res.StatusCode ~= 200 then
+        if res and res.StatusCode == 429 then
+            return "-- api rate limit reached (500/min)"
+        end
+        return "-- api request error\n--[[\n" .. (res and res.Body or "no response") .. "\n--]]"
+    end
+
+    return res.Body
+end
+
 local top_bar = create_instance("Frame", {
     Parent = main_gui,
     BackgroundColor3 = current_theme.element_bg,
@@ -275,7 +325,7 @@ local version_text = create_instance("TextLabel", {
     Position = UDim2.new(0, 64, 0, 7),
     Size = UDim2.new(0, 52, 0, 14),
     Font = Enum.Font.Arcade,
-    Text = "V1.1.5",
+    Text = "V1.1.6",
     TextColor3 = Color3.fromRGB(160, 205, 230),
     TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -979,51 +1029,6 @@ local function case_insensitive_pattern(pattern)
     end)
 end
 
-local function escape_html(text)
-    local clean_text = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
-    return clean_text
-end
-
-local function highlight_background(text)
-    if not active_search_terms or #active_search_terms == 0 then return "" end
-    local result = {}
-    table.insert(result, '<font transparency="1">')
-    local i = 1
-    local text_len = #text
-    
-    while i <= text_len do
-        local earliest_term_idx = nil
-        local earliest_term_len = nil
-        local earliest_term_match = nil
-        
-        for _, term in ipairs(active_search_terms) do
-            local pattern = case_insensitive_pattern(escape_pattern(term))
-            local match_start, match_end = text:find(pattern, i)
-            if match_start and (not earliest_term_idx or match_start < earliest_term_idx) then
-                earliest_term_idx = match_start
-                earliest_term_len = match_end - match_start + 1
-                earliest_term_match = text:sub(match_start, match_end)
-            end
-        end
-        
-        if earliest_term_idx then
-            local before = text:sub(i, earliest_term_idx - 1)
-            if #before > 0 then
-                table.insert(result, escape_html(before))
-            end
-            table.insert(result, '</font><font transparency="0" color="#50825a"><stroke color="#50825a" joins="miter" thickness="4">')
-            table.insert(result, escape_html(earliest_term_match))
-            table.insert(result, '</stroke></font><font transparency="1">')
-            i = earliest_term_idx + earliest_term_len
-        else
-            table.insert(result, escape_html(text:sub(i)))
-            break
-        end
-    end
-    table.insert(result, '</font>')
-    return table.concat(result)
-end
-
 local function syntax_highlight(text)
     local highlighted = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
     local patterns = {
@@ -1067,9 +1072,7 @@ local function view_code(script_instance)
     task.spawn(function()
         local code = decompile_cache[script_instance]
         if not code then
-            local success, source = pcall(function()
-                if decompile then return decompile(script_instance) else return "-- DECOMPILE NOT SUPPORTED" end
-            end)
+            local success, source = pcall(api_decompile, script_instance)
             if not success or type(source) ~= "string" or source == "" then
                 source = "-- FAILED TO DECOMPILE OR EMPTY"
             end
@@ -1236,16 +1239,6 @@ local function perform_search()
             end
         end
 
-        local function get_priority(scr)
-            local path = scr:GetFullName()
-            if path:find("Players%.LocalPlayer") then return 1 end
-            if path:find("ReplicatedStorage") then return 2 end
-            if path:find("Workspace") then return 3 end
-            if path:find("Starter") then return 4 end
-            if path:find("CoreGui") then return 10 end
-            return 5
-        end
-
         local insts
         pcall(function() insts = getinstances() end)
         if not insts then insts = game:GetDescendants() end
@@ -1266,49 +1259,55 @@ local function perform_search()
         if getrunningscripts then for _, scr in ipairs(getrunningscripts()) do add_script(scr) end end
 
         local matched_results = {}
-        local start_time = os.clock()
+        local max_concurrent_threads = 10 
+        local active_threads = 0
+        local process_index = 1
 
-        for _, script_instance in ipairs(all_scripts) do
-            if os.clock() - start_time > 0.01 then
-                task.wait()
-                start_time = os.clock()
+        while process_index <= #all_scripts or active_threads > 0 do
+            while active_threads < max_concurrent_threads and process_index <= #all_scripts do
+                local script_instance = all_scripts[process_index]
+                process_index = process_index + 1
+                active_threads = active_threads + 1
+
+                task.spawn(function()
+                    local code = decompile_cache[script_instance]
+                    if not code then
+                        local s, res = pcall(api_decompile, script_instance)
+                        if s and type(res) == "string" and #res > 0 then
+                            code = res
+                            decompile_cache[script_instance] = code
+                        end
+                    end
+
+                    local all_match = true
+                    local total_count = 0
+                    local script_name_lower = string.lower(script_instance.Name)
+                    local code_lower = code and string.lower(code) or ""
+
+                    for _, term in ipairs(terms) do
+                        local safe_term = escape_pattern(term)
+                        local name_hit = string.find(script_name_lower, safe_term, 1, false)
+                        local code_count = 0
+                        if #code_lower > 0 then
+                            local _, cnt = string.gsub(code_lower, safe_term, "")
+                            code_count = cnt
+                        end
+                        if not name_hit and code_count == 0 then
+                            all_match = false
+                            break
+                        end
+                        if name_hit then total_count = total_count + 1 end
+                        total_count = total_count + code_count
+                    end
+
+                    if all_match then
+                        table.insert(matched_results, {script = script_instance, count = total_count})
+                    end
+
+                    active_threads = active_threads - 1
+                end)
             end
-
-            local code = decompile_cache[script_instance]
-            if not code then
-                local s, res = pcall(decompile, script_instance)
-                if s and type(res) == "string" and #res > 0 then
-                    code = res
-                    decompile_cache[script_instance] = code
-                end
-                task.wait()
-                start_time = os.clock()
-            end
-
-            local all_match = true
-            local total_count = 0
-            local script_name_lower = string.lower(script_instance.Name)
-            local code_lower = code and string.lower(code) or ""
-
-            for _, term in ipairs(terms) do
-                local safe_term = escape_pattern(term)
-                local name_hit = string.find(script_name_lower, safe_term, 1, false)
-                local code_count = 0
-                if #code_lower > 0 then
-                    local _, cnt = string.gsub(code_lower, safe_term, "")
-                    code_count = cnt
-                end
-                if not name_hit and code_count == 0 then
-                    all_match = false
-                    break
-                end
-                if name_hit then total_count = total_count + 1 end
-                total_count = total_count + code_count
-            end
-
-            if all_match then
-                table.insert(matched_results, {script = script_instance, count = total_count})
-            end
+            task.wait() 
         end
 
         table.sort(matched_results, function(a, b) return a.count > b.count end)
