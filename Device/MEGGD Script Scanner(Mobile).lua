@@ -1116,12 +1116,9 @@ local function perform_search()
             end
         end
 
-        local insts
-        pcall(function() insts = getinstances() end)
-        if not insts then insts = game:GetDescendants() end
-
-        for i = 1, #insts do
-            add_script(insts[i])
+        local descendants = game:GetDescendants()
+        for i = 1, #descendants do
+            add_script(descendants[i])
             if i % 5000 == 0 then task.wait() end
         end
 
