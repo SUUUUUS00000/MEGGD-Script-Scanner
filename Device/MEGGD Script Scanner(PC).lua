@@ -4,35 +4,12 @@ local run_service = game:GetService("RunService")
 local text_service = game:GetService("TextService")
 local core_gui = game:GetService("CoreGui")
 
-local themes = {
-    dark_blue = {
-        bg = Color3.fromRGB(15, 20, 30),
-        element_bg = Color3.fromRGB(25, 30, 45),
-        border = Color3.fromRGB(40, 50, 70),
-        text = Color3.fromRGB(200, 210, 230),
-        accent = Color3.fromRGB(60, 120, 210)
-    },
-    dracula = {
-        bg = Color3.fromRGB(40, 42, 54),
-        element_bg = Color3.fromRGB(68, 71, 90),
-        border = Color3.fromRGB(98, 114, 164),
-        text = Color3.fromRGB(248, 248, 242),
-        accent = Color3.fromRGB(189, 147, 249)
-    },
-    monokai = {
-        bg = Color3.fromRGB(39, 40, 34),
-        element_bg = Color3.fromRGB(62, 61, 50),
-        border = Color3.fromRGB(117, 113, 94),
-        text = Color3.fromRGB(248, 248, 242),
-        accent = Color3.fromRGB(249, 38, 114)
-    },
-    vscode = {
-        bg = Color3.fromRGB(30, 30, 30),
-        element_bg = Color3.fromRGB(37, 37, 38),
-        border = Color3.fromRGB(62, 62, 66),
-        text = Color3.fromRGB(212, 212, 212),
-        accent = Color3.fromRGB(10, 119, 215)
-    }
+local current_theme = {
+    bg = Color3.fromRGB(30, 30, 30),
+    element_bg = Color3.fromRGB(37, 37, 38),
+    border = Color3.fromRGB(62, 62, 66),
+    text = Color3.fromRGB(212, 212, 212),
+    accent = Color3.fromRGB(10, 119, 215)
 }
 
 local type_colors = {
@@ -41,11 +18,11 @@ local type_colors = {
     Script = Color3.fromRGB(197, 134, 192)
 }
 
-local current_theme = themes.vscode
 local flat_image = "rbxassetid://2790382281"
 local decompile_cache = {}
 local button_colors = {}
 local active_search_terms = {}
+local active_search_id = 0
 local http_request = request or http_request or (http and http.request)
 
 local function create_instance(class_name, properties)
@@ -325,7 +302,7 @@ local version_text = create_instance("TextLabel", {
     Position = UDim2.new(0, 64, 0, 7),
     Size = UDim2.new(0, 52, 0, 14),
     Font = Enum.Font.Arcade,
-    Text = "V1.1.6",
+    Text = "V1.1.7",
     TextColor3 = Color3.fromRGB(160, 205, 230),
     TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -343,21 +320,6 @@ local title_text = create_instance("TextLabel", {
     TextSize = 18,
     TextXAlignment = Enum.TextXAlignment.Left
 })
-
-local theme_button = create_instance("TextButton", {
-    Parent = top_bar,
-    BackgroundColor3 = current_theme.bg,
-    BorderColor3 = current_theme.border,
-    BorderSizePixel = 1,
-    Position = UDim2.new(1, -156, 0, 8),
-    Size = UDim2.new(0, 80, 0, 30),
-    Font = Enum.Font.Arcade,
-    Text = "THEME",
-    TextColor3 = current_theme.text,
-    TextSize = 14,
-    AutoButtonColor = false
-})
-button_colors[theme_button] = current_theme.bg
 
 local close_button = create_instance("TextButton", {
     Parent = top_bar,
@@ -820,96 +782,6 @@ local function bind_tap(button, callback)
     end)
 end
 
-local function apply_theme(theme_name)
-    current_theme = themes[theme_name]
-    main_gui.BackgroundColor3 = current_theme.bg
-    main_gui.BorderColor3 = current_theme.border
-    top_bar.BackgroundColor3 = current_theme.element_bg
-    title_text.TextColor3 = current_theme.text
-    
-    theme_button.BackgroundColor3 = current_theme.bg
-    theme_button.BorderColor3 = current_theme.border
-    theme_button.TextColor3 = current_theme.text
-    button_colors[theme_button] = current_theme.bg
-    
-    search_container.BackgroundColor3 = current_theme.bg
-    search_box.BackgroundColor3 = current_theme.element_bg
-    search_box.BorderColor3 = current_theme.border
-    search_box.TextColor3 = current_theme.text
-    search_box.PlaceholderColor3 = current_theme.border
-    
-    search_button.BackgroundColor3 = current_theme.accent
-    button_colors[search_button] = current_theme.accent
-    
-    content_area.BackgroundColor3 = current_theme.bg
-    results_scroll.BackgroundColor3 = current_theme.bg
-    results_scroll.ScrollBarImageColor3 = current_theme.accent
-    code_view_container.BackgroundColor3 = current_theme.element_bg
-    code_top_bar.BackgroundColor3 = current_theme.bg
-    
-    back_button.BackgroundColor3 = current_theme.border
-    back_button.TextColor3 = current_theme.text
-    button_colors[back_button] = current_theme.border
-    
-    copy_button.BackgroundColor3 = current_theme.accent
-    button_colors[copy_button] = current_theme.accent
-    
-    lines_info.TextColor3 = current_theme.text
-    code_area.BackgroundColor3 = current_theme.bg
-    line_numbers_scroll.BackgroundColor3 = current_theme.element_bg
-    code_scroll.ScrollBarImageColor3 = current_theme.accent
-    handle_part_h.BackgroundColor3 = current_theme.accent
-    handle_part_v.BackgroundColor3 = current_theme.accent
-    
-    close_button.BackgroundColor3 = current_theme.bg
-    close_button.BorderColor3 = current_theme.border
-    button_colors[close_button] = current_theme.bg
-    
-    hide_button.BackgroundColor3 = current_theme.bg
-    hide_button.BorderColor3 = current_theme.border
-    button_colors[hide_button] = current_theme.bg
-    
-    floating_hide.BackgroundColor3 = current_theme.bg
-    floating_hide.BorderColor3 = current_theme.border
-    button_colors[floating_hide] = current_theme.bg
-    
-    for _, child in ipairs(results_scroll:GetChildren()) do
-        if child:IsA("Frame") and child.Name == "Result" then
-            child.BackgroundColor3 = current_theme.element_bg
-            child.BorderColor3 = current_theme.border
-            local click_btn = child:FindFirstChildOfClass("TextButton")
-            if click_btn then button_colors[click_btn] = current_theme.element_bg end
-        end
-    end
-    for _, child in ipairs(line_numbers_scroll:GetChildren()) do
-        if child:IsA("TextLabel") then child.TextColor3 = Color3.fromRGB(150, 150, 150) end
-    end
-    for _, child in ipairs(code_scroll:GetChildren()) do
-        if child:IsA("Frame") then
-            for _, label in ipairs(child:GetChildren()) do
-                if label:IsA("TextLabel") and label.ZIndex == 2 then
-                    label.TextColor3 = current_theme.text
-                end
-            end
-        end
-    end
-    
-    for _, fr in ipairs(icon_search:GetChildren()) do fr.BackgroundColor3 = current_theme.text end
-    for _, fr in ipairs(icon_loading:GetChildren()) do fr.BackgroundColor3 = current_theme.text end
-    for _, fr in ipairs(icon_copy:GetChildren()) do fr.BackgroundColor3 = current_theme.text end
-    for _, fr in ipairs(icon_eye_slash:GetChildren()) do fr.BackgroundColor3 = current_theme.text end
-    for _, fr in ipairs(icon_eye_open:GetChildren()) do fr.BackgroundColor3 = current_theme.text end
-end
-
-local theme_keys = {"vscode", "dark_blue", "dracula", "monokai"}
-local theme_index = 1
-
-bind_tap(theme_button, function()
-    theme_index = theme_index + 1
-    if theme_index > #theme_keys then theme_index = 1 end
-    apply_theme(theme_keys[theme_index])
-end)
-
 bind_tap(hide_button, function()
     if not is_collapsed then
         is_collapsed = true
@@ -1206,6 +1078,7 @@ local function perform_search()
         end
     end
     results_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    
     local raw_query = search_box.Text
     if raw_query == "" then 
         active_search_terms = {}
@@ -1220,6 +1093,7 @@ local function perform_search()
             if #terms >= 25 then break end
         end
     end
+    
     if #terms == 0 then 
         active_search_terms = {}
         return 
@@ -1227,6 +1101,9 @@ local function perform_search()
 
     active_search_terms = terms
     set_search_state("loading")
+    
+    active_search_id = os.clock()
+    local search_id = active_search_id
 
     search_thread = task.spawn(function()
         local all_scripts_set = {}
@@ -1243,14 +1120,9 @@ local function perform_search()
         pcall(function() insts = getinstances() end)
         if not insts then insts = game:GetDescendants() end
 
-        local y_counter = 0
         for i = 1, #insts do
             add_script(insts[i])
-            y_counter = y_counter + 1
-            if y_counter > 5000 then
-                task.wait()
-                y_counter = 0
-            end
+            if i % 5000 == 0 then task.wait() end
         end
 
         if getscripts then for _, scr in ipairs(getscripts()) do add_script(scr) end end
@@ -1258,153 +1130,157 @@ local function perform_search()
         if getloadedmodules then for _, scr in ipairs(getloadedmodules()) do add_script(scr) end end
         if getrunningscripts then for _, scr in ipairs(getrunningscripts()) do add_script(scr) end end
 
-        local matched_results = {}
-        local max_concurrent_threads = 10 
-        local active_threads = 0
-        local process_index = 1
+        local active_workers = 0
+        local max_concurrent_workers = 10
 
-        while process_index <= #all_scripts or active_threads > 0 do
-            while active_threads < max_concurrent_threads and process_index <= #all_scripts do
-                local script_instance = all_scripts[process_index]
-                process_index = process_index + 1
-                active_threads = active_threads + 1
-
+        for i = 1, #all_scripts do
+            if active_search_id ~= search_id then break end
+            
+            local script_instance = all_scripts[i]
+            local s, bytecode = pcall(getscriptbytecode, script_instance)
+            local bytecode_lower = (s and type(bytecode) == "string") and string.lower(bytecode) or ""
+            local name_lower = string.lower(script_instance.Name)
+            
+            local match_all = true
+            for _, term in ipairs(terms) do
+                if not string.find(name_lower, term, 1, true) and not string.find(bytecode_lower, term, 1, true) then
+                    match_all = false
+                    break
+                end
+            end
+            
+            if match_all then
+                while active_workers >= max_concurrent_workers do task.wait(0.1) end
+                active_workers = active_workers + 1
+                
                 task.spawn(function()
                     local code = decompile_cache[script_instance]
                     if not code then
-                        local s, res = pcall(api_decompile, script_instance)
-                        if s and type(res) == "string" and #res > 0 then
+                        local ok, res = pcall(api_decompile, script_instance)
+                        if ok and type(res) == "string" and #res > 0 then
                             code = res
                             decompile_cache[script_instance] = code
                         end
                     end
-
-                    local all_match = true
+                    
                     local total_count = 0
-                    local script_name_lower = string.lower(script_instance.Name)
-                    local code_lower = code and string.lower(code) or ""
+                    local code_lower2 = code and string.lower(code) or ""
 
                     for _, term in ipairs(terms) do
                         local safe_term = escape_pattern(term)
-                        local name_hit = string.find(script_name_lower, safe_term, 1, false)
+                        local name_hit = string.find(name_lower, safe_term, 1, false)
                         local code_count = 0
-                        if #code_lower > 0 then
-                            local _, cnt = string.gsub(code_lower, safe_term, "")
+                        if #code_lower2 > 0 then
+                            local _, cnt = string.gsub(code_lower2, safe_term, "")
                             code_count = cnt
-                        end
-                        if not name_hit and code_count == 0 then
-                            all_match = false
-                            break
                         end
                         if name_hit then total_count = total_count + 1 end
                         total_count = total_count + code_count
                     end
+                    
+                    if active_search_id == search_id and total_count > 0 then
+                        local hash_text = "HASH: N/A"
+                        if getscripthash then
+                            pcall(function()
+                                local h = getscripthash(script_instance)
+                                if h then hash_text = "HASH: " .. string.sub(h, 1, 12) .. "..." end
+                            end)
+                        end
 
-                    if all_match then
-                        table.insert(matched_results, {script = script_instance, count = total_count})
+                        local path_text = script_instance:GetFullName()
+                        local s_color = type_colors[script_instance.ClassName] or current_theme.text
+
+                        local result_frame = create_instance("Frame", {
+                            Name = "Result",
+                            Parent = results_scroll,
+                            BackgroundColor3 = current_theme.element_bg,
+                            BorderColor3 = current_theme.border,
+                            BorderSizePixel = 1,
+                            Size = UDim2.new(1, -10, 0, 55),
+                            LayoutOrder = -total_count 
+                        })
+                        button_colors[result_frame] = current_theme.element_bg
+
+                        create_instance("TextLabel", {
+                            Name = "NameLabel",
+                            Parent = result_frame,
+                            BackgroundTransparency = 1,
+                            Position = UDim2.new(0, 10, 0, 5),
+                            Size = UDim2.new(0.7, 0, 0, 14),
+                            Font = Enum.Font.Arcade,
+                            Text = script_instance.Name .. " (" .. script_instance.ClassName .. ")",
+                            TextColor3 = s_color,
+                            TextSize = 14,
+                            TextXAlignment = Enum.TextXAlignment.Left
+                        })
+
+                        create_instance("TextLabel", {
+                            Name = "HashLabel",
+                            Parent = result_frame,
+                            BackgroundTransparency = 1,
+                            Position = UDim2.new(0, 10, 0, 20),
+                            Size = UDim2.new(0.7, 0, 0, 14),
+                            Font = Enum.Font.Arcade,
+                            Text = hash_text,
+                            TextColor3 = Color3.fromRGB(150, 150, 150),
+                            TextSize = 12,
+                            TextXAlignment = Enum.TextXAlignment.Left
+                        })
+
+                        create_instance("TextLabel", {
+                            Name = "PathLabel",
+                            Parent = result_frame,
+                            BackgroundTransparency = 1,
+                            Position = UDim2.new(0, 10, 0, 35),
+                            Size = UDim2.new(1, -60, 0, 14),
+                            Font = Enum.Font.Arcade,
+                            Text = "PATH: " .. path_text,
+                            TextColor3 = Color3.fromRGB(100, 100, 100),
+                            TextSize = 12,
+                            TextXAlignment = Enum.TextXAlignment.Left,
+                            TextTruncate = Enum.TextTruncate.AtEnd
+                        })
+
+                        create_instance("TextLabel", {
+                            Parent = result_frame,
+                            BackgroundTransparency = 1,
+                            Position = UDim2.new(1, -110, 0, 0),
+                            Size = UDim2.new(0, 100, 1, 0),
+                            Font = Enum.Font.Arcade,
+                            Text = tostring(total_count) .. " MATCH",
+                            TextColor3 = current_theme.accent,
+                            TextSize = 12,
+                            TextXAlignment = Enum.TextXAlignment.Right
+                        })
+
+                        local click_btn = create_instance("TextButton", {
+                            Parent = result_frame,
+                            BackgroundTransparency = 1,
+                            Size = UDim2.new(1, 0, 1, 0),
+                            Text = ""
+                        })
+
+                        bind_tap(click_btn, function()
+                            view_code(script_instance)
+                        end)
                     end
-
-                    active_threads = active_threads - 1
+                    
+                    active_workers = active_workers - 1
                 end)
             end
-            task.wait() 
+            
+            if i % 250 == 0 then task.wait() end 
         end
 
-        table.sort(matched_results, function(a, b) return a.count > b.count end)
-
-        for order, entry in ipairs(matched_results) do
-            local script_instance = entry.script
-            local match_count = entry.count
-
-            local hash_text = "HASH: N/A"
-            if getscripthash then
-                pcall(function()
-                    local h = getscripthash(script_instance)
-                    if h then hash_text = "HASH: " .. string.sub(h, 1, 12) .. "..." end
-                end)
-            end
-
-            local path_text = script_instance:GetFullName()
-            local s_color = type_colors[script_instance.ClassName] or current_theme.text
-
-            local result_frame = create_instance("Frame", {
-                Name = "Result",
-                Parent = results_scroll,
-                BackgroundColor3 = current_theme.element_bg,
-                BorderColor3 = current_theme.border,
-                BorderSizePixel = 1,
-                Size = UDim2.new(1, -10, 0, 55),
-                LayoutOrder = order
-            })
-            button_colors[result_frame] = current_theme.element_bg
-
-            create_instance("TextLabel", {
-                Name = "NameLabel",
-                Parent = result_frame,
-                BackgroundTransparency = 1,
-                Position = UDim2.new(0, 10, 0, 5),
-                Size = UDim2.new(0.7, 0, 0, 14),
-                Font = Enum.Font.Arcade,
-                Text = script_instance.Name .. " (" .. script_instance.ClassName .. ")",
-                TextColor3 = s_color,
-                TextSize = 14,
-                TextXAlignment = Enum.TextXAlignment.Left
-            })
-
-            create_instance("TextLabel", {
-                Name = "HashLabel",
-                Parent = result_frame,
-                BackgroundTransparency = 1,
-                Position = UDim2.new(0, 10, 0, 20),
-                Size = UDim2.new(0.7, 0, 0, 14),
-                Font = Enum.Font.Arcade,
-                Text = hash_text,
-                TextColor3 = Color3.fromRGB(150, 150, 150),
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left
-            })
-
-            create_instance("TextLabel", {
-                Name = "PathLabel",
-                Parent = result_frame,
-                BackgroundTransparency = 1,
-                Position = UDim2.new(0, 10, 0, 35),
-                Size = UDim2.new(1, -60, 0, 14),
-                Font = Enum.Font.Arcade,
-                Text = "PATH: " .. path_text,
-                TextColor3 = Color3.fromRGB(100, 100, 100),
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                TextTruncate = Enum.TextTruncate.AtEnd
-            })
-
-            if match_count > 0 then
-                create_instance("TextLabel", {
-                    Parent = result_frame,
-                    BackgroundTransparency = 1,
-                    Position = UDim2.new(1, -110, 0, 0),
-                    Size = UDim2.new(0, 100, 1, 0),
-                    Font = Enum.Font.Arcade,
-                    Text = tostring(match_count) .. " MATCH",
-                    TextColor3 = current_theme.accent,
-                    TextSize = 12,
-                    TextXAlignment = Enum.TextXAlignment.Right
-                })
-            end
-
-            local click_btn = create_instance("TextButton", {
-                Parent = result_frame,
-                BackgroundTransparency = 1,
-                Size = UDim2.new(1, 0, 1, 0),
-                Text = ""
-            })
-
-            bind_tap(click_btn, function()
-                view_code(script_instance)
-            end)
+        while active_workers > 0 and active_search_id == search_id do
+            task.wait(0.1)
         end
+        
+        task.wait(0.5)
 
-        set_search_state("search")
+        if active_search_id == search_id then
+            set_search_state("search")
+        end
     end)
 end
 
