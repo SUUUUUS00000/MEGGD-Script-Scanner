@@ -25,6 +25,9 @@ local active_search_terms = {}
 local active_search_id = 0
 local http_request = request or http_request or (http and http.request)
 
+local setting_decompiler = "lua.expert"
+local setting_remove_comments = false
+
 local function create_instance(class_name, properties)
     local instance = Instance.new(class_name)
     for property, value in pairs(properties) do
@@ -237,7 +240,7 @@ local base64_encoder = (crypt and crypt.base64encode) or function(data)
     end)..({ '', '==', '=' })[#data % 3 + 1])
 end
 
-getgenv().api_decompile = function(scr)
+getgenv().api_decompile_expert = function(scr)
     if not getscriptbytecode then return "-- getscriptbytecode not supported" end
     if not http_request then return "-- http requests not supported" end
 
@@ -265,6 +268,36 @@ getgenv().api_decompile = function(scr)
     end
 
     return res.Body
+end
+
+getgenv().api_decompile_shiny = function(scr)
+    if not getscriptbytecode then return "-- getscriptbytecode not supported" end
+    if not http_request then return "-- http requests not supported" end
+
+    local ok, bytecode = pcall(getscriptbytecode, scr)
+    if not ok then
+        return "-- failed to read script bytecode\n--[[\n" .. tostring(bytecode) .. "\n--]]"
+    end
+
+    local res = http_request({
+        Url = "https://decompile-r3lh.onrender.com/luau/decompile",
+        Method = "POST",
+        Body = base64_encoder(bytecode)
+    })
+
+    if not res or res.StatusCode ~= 200 then
+        return "-- api request error\n--[[\n" .. (res and res.Body or "no response") .. "\n--]]"
+    end
+
+    return res.Body
+end
+
+local function do_decompile(script_instance)
+    if setting_decompiler == "Shiny" then
+        return api_decompile_shiny(script_instance)
+    else
+        return api_decompile_expert(script_instance)
+    end
 end
 
 local top_bar = create_instance("Frame", {
@@ -302,7 +335,7 @@ local version_text = create_instance("TextLabel", {
     Position = UDim2.new(0, 64, 0, 7),
     Size = UDim2.new(0, 52, 0, 14),
     Font = Enum.Font.Arcade,
-    Text = "V1.1.7",
+    Text = "V1.2.0",
     TextColor3 = Color3.fromRGB(160, 205, 230),
     TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -344,6 +377,18 @@ local hide_button = create_instance("TextButton", {
     AutoButtonColor = false
 })
 button_colors[hide_button] = current_theme.bg
+
+local settings_button = create_instance("TextButton", {
+    Parent = top_bar,
+    BackgroundColor3 = current_theme.bg,
+    BorderColor3 = current_theme.border,
+    BorderSizePixel = 1,
+    Position = UDim2.new(1, -106, 0, 8),
+    Size = UDim2.new(0, 30, 0, 30),
+    Text = "",
+    AutoButtonColor = false
+})
+button_colors[settings_button] = current_theme.bg
 
 local floating_hide = create_instance("TextButton", {
     Parent = screen_gui,
@@ -495,6 +540,17 @@ local icon_eye_open = draw_pixel_icon(floating_hide, {
     "000011110000"
 }, current_theme.text, 2)
 
+local icon_gear = draw_pixel_icon(settings_button, {
+    "01011010",
+    "11111111",
+    "01100110",
+    "11000011",
+    "11000011",
+    "01100110",
+    "11111111",
+    "01011010"
+}, current_theme.text, 2)
+
 local is_collapsed = false
 local original_main_size = UDim2.new(0, 420, 0, 360)
 local original_main_pos = UDim2.new(0.5, -200, 0.5, -150)
@@ -523,7 +579,7 @@ local content_area = create_instance("Frame", {
     BorderSizePixel = 0,
     Position = UDim2.new(0, 10, 0, 106),
     Size = UDim2.new(1, -20, 1, -116),
-    ClipsDescendants = true
+    ClipsDescendants = false
 })
 
 local results_scroll = create_instance("ScrollingFrame", {
@@ -559,6 +615,15 @@ local code_view_container = create_instance("Frame", {
     Size = UDim2.new(1, 0, 1, 0),
     Visible = false,
     ClipsDescendants = true
+})
+
+local settings_container = create_instance("Frame", {
+    Parent = content_area,
+    BackgroundColor3 = current_theme.bg,
+    BorderSizePixel = 0,
+    Size = UDim2.new(1, 0, 1, 0),
+    Visible = false,
+    ClipsDescendants = false
 })
 
 local code_top_bar = create_instance("Frame", {
@@ -679,6 +744,142 @@ local code_layout = create_instance("UIListLayout", {
     SortOrder = Enum.SortOrder.LayoutOrder
 })
 
+local settings_back_button = create_instance("TextButton", {
+    Parent = settings_container,
+    BackgroundColor3 = current_theme.border,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 5, 0, 20),
+    Size = UDim2.new(0, 60, 0, 20),
+    Font = Enum.Font.Arcade,
+    Text = "BACK",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    AutoButtonColor = false
+})
+button_colors[settings_back_button] = current_theme.border
+
+local decompile_mode_label = create_instance("TextLabel", {
+    Parent = settings_container,
+    BackgroundTransparency = 1,
+    Position = UDim2.new(0, 10, 0, 40),
+    Size = UDim2.new(1, -20, 0, 20),
+    Font = Enum.Font.Arcade,
+    Text = "Decompile Mode",
+    TextColor3 = current_theme.text,
+    TextSize = 16,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
+
+local dropdown_main = create_instance("TextButton", {
+    Parent = settings_container,
+    BackgroundColor3 = current_theme.bg,
+    BorderColor3 = current_theme.border,
+    BorderSizePixel = 1,
+    Position = UDim2.new(0, 10, 0, 65),
+    Size = UDim2.new(1, -20, 0, 30),
+    Text = "",
+    AutoButtonColor = false
+})
+button_colors[dropdown_main] = current_theme.bg
+
+local dropdown_text = create_instance("TextLabel", {
+    Parent = dropdown_main,
+    BackgroundTransparency = 1,
+    Position = UDim2.new(0, 10, 0, 0),
+    Size = UDim2.new(1, -40, 1, 0),
+    Font = Enum.Font.Arcade,
+    Text = "lua.expert",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
+
+local icon_arrow_down = draw_pixel_icon(dropdown_main, {
+    "1111111",
+    "0111110",
+    "0011100",
+    "0001000"
+}, current_theme.text, 2)
+icon_arrow_down.Position = UDim2.new(1, -15, 0.5, 0)
+
+local checkbox_label = create_instance("TextLabel", {
+    Parent = settings_container,
+    BackgroundTransparency = 1,
+    Position = UDim2.new(0, 10, 0, 110),
+    Size = UDim2.new(1, -50, 0, 20),
+    Font = Enum.Font.Arcade,
+    Text = "Do not show comments in code",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
+
+local checkbox_frame = create_instance("TextButton", {
+    Parent = settings_container,
+    BackgroundColor3 = current_theme.bg,
+    BorderColor3 = current_theme.border,
+    BorderSizePixel = 1,
+    Position = UDim2.new(1, -30, 0, 110),
+    Size = UDim2.new(0, 20, 0, 20),
+    Text = "",
+    AutoButtonColor = false
+})
+button_colors[checkbox_frame] = current_theme.bg
+
+local checkbox_inner = create_instance("Frame", {
+    Parent = checkbox_frame,
+    BackgroundColor3 = current_theme.accent,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0.5, 0, 0.5, 0),
+    Size = UDim2.new(0, 0, 0, 0),
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundTransparency = 1
+})
+
+local dropdown_list = create_instance("Frame", {
+    Parent = settings_container,
+    BackgroundColor3 = current_theme.bg,
+    BorderColor3 = current_theme.border,
+    BorderSizePixel = 1,
+    Position = UDim2.new(0, 10, 0, 94),
+    Size = UDim2.new(1, -20, 0, 60),
+    ZIndex = 10,
+    Visible = false,
+    Active = true
+})
+
+local btn_expert = create_instance("TextButton", {
+    Parent = dropdown_list,
+    BackgroundColor3 = current_theme.bg,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 0, 0, 0),
+    Size = UDim2.new(1, 0, 0, 30),
+    Font = Enum.Font.Arcade,
+    Text = " lua.expert",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 11,
+    AutoButtonColor = false
+})
+button_colors[btn_expert] = current_theme.bg
+
+local btn_shiny = create_instance("TextButton", {
+    Parent = dropdown_list,
+    BackgroundColor3 = current_theme.bg,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 0, 0, 30),
+    Size = UDim2.new(1, 0, 0, 30),
+    Font = Enum.Font.Arcade,
+    Text = " Shiny",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 11,
+    AutoButtonColor = false
+})
+button_colors[btn_shiny] = current_theme.bg
+
 code_layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
     local max_width = 0
     for _, child in ipairs(code_scroll:GetChildren()) do
@@ -782,6 +983,47 @@ local function bind_tap(button, callback)
     end)
 end
 
+local is_dropdown_open = false
+bind_tap(dropdown_main, function()
+    is_dropdown_open = not is_dropdown_open
+    dropdown_list.Visible = is_dropdown_open
+    tween_service:Create(icon_arrow_down, TweenInfo.new(0.2), {Rotation = is_dropdown_open and 180 or 0}):Play()
+end)
+
+local function select_decompiler(name)
+    if setting_decompiler ~= name then
+        decompile_cache = {}
+    end
+    setting_decompiler = name
+    dropdown_text.Text = name
+    is_dropdown_open = false
+    dropdown_list.Visible = false
+    tween_service:Create(icon_arrow_down, TweenInfo.new(0.2), {Rotation = 0}):Play()
+end
+
+bind_tap(btn_expert, function() select_decompiler("lua.expert") end)
+bind_tap(btn_shiny, function() select_decompiler("Shiny") end)
+
+bind_tap(checkbox_frame, function()
+    setting_remove_comments = not setting_remove_comments
+    if setting_remove_comments then
+        tween_service:Create(checkbox_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 12, 0, 12), BackgroundTransparency = 0}):Play()
+    else
+        tween_service:Create(checkbox_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1}):Play()
+    end
+end)
+
+bind_tap(settings_button, function()
+    results_scroll.Visible = false
+    code_view_container.Visible = false
+    settings_container.Visible = true
+end)
+
+bind_tap(settings_back_button, function()
+    settings_container.Visible = false
+    results_scroll.Visible = true
+end)
+
 bind_tap(hide_button, function()
     if not is_collapsed then
         is_collapsed = true
@@ -815,6 +1057,7 @@ bind_tap(hide_button, function()
         tw:Play()
         tw.Completed:Connect(function()
             main_gui.Visible = false
+            resize_handle.Visible = false
             floating_hide.Visible = true
             tween_service:Create(floating_hide, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
                 Size = UDim2.new(0, 40, 0, 40),
@@ -875,7 +1118,7 @@ user_input_service.InputEnded:Connect(function(input)
                         floating_hide.Visible = false
                         main_gui.Position = center_pos
                         main_gui.Visible = true
-                        
+                        resize_handle.Visible = true
                         tween_service:Create(resize_handle, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
                             Size = UDim2.new(0, 20, 0, 20)
                         }):Play()
@@ -927,6 +1170,7 @@ local active_decompile_text = ""
 
 local function view_code(script_instance)
     results_scroll.Visible = false
+    settings_container.Visible = false
     code_view_container.Visible = true
     lines_info.Text = "DECOMPILING..."
     
@@ -944,7 +1188,7 @@ local function view_code(script_instance)
     task.spawn(function()
         local code = decompile_cache[script_instance]
         if not code then
-            local success, source = pcall(api_decompile, script_instance)
+            local success, source = pcall(do_decompile, script_instance)
             if not success or type(source) ~= "string" or source == "" then
                 source = "-- FAILED TO DECOMPILE OR EMPTY"
             end
@@ -954,6 +1198,9 @@ local function view_code(script_instance)
         
         code = string.gsub(code, "\r", "")
         code = string.gsub(code, "\t", "    ")
+        if setting_remove_comments then
+            code = string.gsub(code, "%-%-[^\n]*", "")
+        end
         active_decompile_text = code
         
         local lines = string.split(code, "\n")
@@ -1153,7 +1400,7 @@ local function perform_search()
                 task.spawn(function()
                     local code = decompile_cache[script_instance]
                     if not code then
-                        local ok, res = pcall(api_decompile, script_instance)
+                        local ok, res = pcall(do_decompile, script_instance)
                         if ok and type(res) == "string" and #res > 0 then
                             code = res
                             decompile_cache[script_instance] = code
@@ -1284,6 +1531,10 @@ end
 bind_tap(search_button, function()
     if code_view_container.Visible then
         code_view_container.Visible = false
+        results_scroll.Visible = true
+    end
+    if settings_container.Visible then
+        settings_container.Visible = false
         results_scroll.Visible = true
     end
     perform_search()
