@@ -16,3 +16,22 @@
 + Fixed a bug with the hide button (it incorrectly detected the release of a finger/mouse).
 + Fixed line scrolling bug.
 + Added highlighting of matches.
+
+# Script Scanner Update to 1.1.6
+
++ The decompiler has been fixed.
+
+# Script Scanner Update to 1.1.7
+
++ Improved search speed.
++ The API 500 error has been fixed.
++ The "THEME" button has been removed.
++ The search has been fixed.
+
+# Script Scanner Update to 1.2.0
+
++ Added setting
+ - Decompiler mode
+ - Do not show comments in code
++ The bug with `resize_handle` has been fixed.
++ Added new decompiler "Shiny" from Rocult.
