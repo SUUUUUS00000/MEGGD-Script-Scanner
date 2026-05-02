@@ -335,7 +335,7 @@ local version_text = create_instance("TextLabel", {
     Position = UDim2.new(0, 64, 0, 7),
     Size = UDim2.new(0, 52, 0, 14),
     Font = Enum.Font.Arcade,
-    Text = "V1.2.0",
+    Text = "V1.2.1",
     TextColor3 = Color3.fromRGB(160, 205, 230),
     TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -842,7 +842,8 @@ local dropdown_list = create_instance("Frame", {
     BorderColor3 = current_theme.border,
     BorderSizePixel = 1,
     Position = UDim2.new(0, 10, 0, 94),
-    Size = UDim2.new(1, -20, 0, 60),
+    Size = UDim2.new(1, -20, 0, 0),
+    ClipsDescendants = true,
     ZIndex = 10,
     Visible = false,
     Active = true
@@ -974,7 +975,7 @@ local function bind_tap(button, callback)
     button.InputEnded:Connect(function(input)
         if start_pos and input.UserInputType == Enum.UserInputType.MouseButton1 then
             local delta = (input.Position - start_pos).Magnitude
-            if delta < 5 and (os.clock() - start_time) < 0.5 then
+            if delta < 10 and (os.clock() - start_time) < 0.5 then
                 animate_button(button)
                 callback()
             end
@@ -986,8 +987,22 @@ end
 local is_dropdown_open = false
 bind_tap(dropdown_main, function()
     is_dropdown_open = not is_dropdown_open
-    dropdown_list.Visible = is_dropdown_open
     tween_service:Create(icon_arrow_down, TweenInfo.new(0.2), {Rotation = is_dropdown_open and 180 or 0}):Play()
+    
+    if is_dropdown_open then
+        dropdown_list.Visible = true
+        tween_service:Create(dropdown_list, TweenInfo.new(0.2), {Size = UDim2.new(1, -20, 0, 60)}):Play()
+        tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 165)}):Play()
+        tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 165)}):Play()
+    else
+        local tw = tween_service:Create(dropdown_list, TweenInfo.new(0.2), {Size = UDim2.new(1, -20, 0, 0)})
+        tw:Play()
+        tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 110)}):Play()
+        tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 110)}):Play()
+        tw.Completed:Connect(function()
+            if not is_dropdown_open then dropdown_list.Visible = false end
+        end)
+    end
 end)
 
 local function select_decompiler(name)
@@ -997,8 +1012,15 @@ local function select_decompiler(name)
     setting_decompiler = name
     dropdown_text.Text = name
     is_dropdown_open = false
-    dropdown_list.Visible = false
     tween_service:Create(icon_arrow_down, TweenInfo.new(0.2), {Rotation = 0}):Play()
+    
+    local tw = tween_service:Create(dropdown_list, TweenInfo.new(0.2), {Size = UDim2.new(1, -20, 0, 0)})
+    tw:Play()
+    tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 110)}):Play()
+    tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 110)}):Play()
+    tw.Completed:Connect(function()
+        if not is_dropdown_open then dropdown_list.Visible = false end
+    end)
 end
 
 bind_tap(btn_expert, function() select_decompiler("lua.expert") end)
@@ -1198,9 +1220,18 @@ local function view_code(script_instance)
         
         code = string.gsub(code, "\r", "")
         code = string.gsub(code, "\t", "    ")
+        
         if setting_remove_comments then
             code = string.gsub(code, "%-%-[^\n]*", "")
+            local clean_lines = {}
+            for _, line in ipairs(string.split(code, "\n")) do
+                if string.match(line, "%S") then
+                    table.insert(clean_lines, line)
+                end
+            end
+            code = table.concat(clean_lines, "\n")
         end
+        
         active_decompile_text = code
         
         local lines = string.split(code, "\n")
@@ -1629,4 +1660,5 @@ user_input_service.InputEnded:Connect(function(input)
         end
     end
 end)
+
 print("MEGGD Script Scanner PC - Loaded")
