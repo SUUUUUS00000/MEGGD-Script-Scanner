@@ -35,3 +35,8 @@
  - Do not show comments in code
 + The bug with `resize_handle` has been fixed.
 + Added new decompiler "Shiny" from Rocult.
+
+# Script Scanner Update to 1.2.1
+
++ The "Do not show comments in code" setting has been fixed.
++ Added animation when selecting the Decompiler mode.
