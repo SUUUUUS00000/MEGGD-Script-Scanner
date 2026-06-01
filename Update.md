@@ -40,3 +40,10 @@
 
 + The "Do not show comments in code" setting has been fixed.
 + Added animation when selecting the Decompiler mode.
+
+# Script Scanner Update to 1.2.5
+
++ Added two new settings: "Mark active scripts" and "Don't show empty scripts".
++ Added loading when there are a large number of bytes in the code.
++ Bytes added.
++ Added new decompiler "x2125.xyz" from xeeer.
