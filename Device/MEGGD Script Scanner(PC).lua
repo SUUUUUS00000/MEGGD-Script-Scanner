@@ -27,6 +27,29 @@ local http_request = request or http_request or (http and http.request)
 
 local setting_decompiler = "lua.expert"
 local setting_remove_comments = false
+local setting_dont_show_empty = false
+local setting_mark_active = false
+
+local function is_empty_or_error(code)
+    if not code or string.match(code, "^%s*$") then
+        return true
+    end
+    if string.sub(code, 1, 2) == "--" then
+        local lower_code = string.lower(code)
+        if string.find(lower_code, "failed") or string.find(lower_code, "error") or string.find(lower_code, "not supported") or string.find(lower_code, "empty") then
+            return true
+        end
+    end
+    return false
+end
+
+local function get_cache_key(script_instance)
+    local success, bytecode = pcall(getscriptbytecode, script_instance)
+    if success and type(bytecode) == "string" and #bytecode > 0 then
+        return bytecode
+    end
+    return script_instance
+end
 
 local function create_instance(class_name, properties)
     local instance = Instance.new(class_name)
@@ -292,9 +315,53 @@ getgenv().api_decompile_shiny = function(scr)
     return res.Body
 end
 
+getgenv().api_decompile_x2125 = function(scr)
+    if not getscriptbytecode then return "-- getscriptbytecode not supported" end
+    if not http_request then return "-- http requests not supported" end
+
+    local ok, bytecode = pcall(getscriptbytecode, scr)
+    if not ok then
+        return "-- failed to read script bytecode\n--[[\n" .. tostring(bytecode) .. "\n--]]"
+    end
+
+    local payload = game:GetService("HttpService"):JSONEncode({
+        script = base64_encoder(bytecode),
+        options = {
+            renamingType = "INFER",
+            upvalueComment = false,
+            lineDefinedComment = false
+        }
+    })
+
+    local res = http_request({
+        Url = "https://x2125.xyz/decompile",
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json"
+        },
+        Body = payload
+    })
+
+    if not res then 
+        return "-- api request error no response" 
+    end
+
+    if res.StatusCode == 200 then
+        local dok, decoded = pcall(function() return game:GetService("HttpService"):JSONDecode(res.Body) end)
+        if dok and type(decoded) == "table" and type(decoded.data) == "string" then
+            return decoded.data
+        end
+        return "-- api request error invalid server response"
+    end
+
+    return "-- api request error\n--[[\nHTTP " .. tostring(res.StatusCode) .. "\n" .. tostring(res.Body) .. "\n--]]"
+end
+
 local function do_decompile(script_instance)
     if setting_decompiler == "Shiny" then
         return api_decompile_shiny(script_instance)
+    elseif setting_decompiler == "x2125.xyz" then
+        return api_decompile_x2125(script_instance)
     else
         return api_decompile_expert(script_instance)
     end
@@ -335,7 +402,7 @@ local version_text = create_instance("TextLabel", {
     Position = UDim2.new(0, 64, 0, 7),
     Size = UDim2.new(0, 52, 0, 14),
     Font = Enum.Font.Arcade,
-    Text = "V1.2.1",
+    Text = "V1.2.5",
     TextColor3 = Color3.fromRGB(160, 205, 230),
     TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -595,7 +662,8 @@ local results_scroll = create_instance("ScrollingFrame", {
     MidImage = flat_image,
     TopImage = flat_image,
     ClipsDescendants = true,
-    ElasticBehavior = Enum.ElasticBehavior.Never
+    ElasticBehavior = Enum.ElasticBehavior.Never,
+    ScrollingDirection = Enum.ScrollingDirection.Y
 })
 
 local results_layout = create_instance("UIListLayout", {
@@ -638,7 +706,7 @@ local back_button = create_instance("TextButton", {
     Parent = code_top_bar,
     BackgroundColor3 = current_theme.border,
     BorderSizePixel = 0,
-    Position = UDim2.new(0, 5, 0, 5),
+    Position = UDim2.new(0, 2, 0, 5),
     Size = UDim2.new(0, 60, 0, 20),
     Font = Enum.Font.Arcade,
     Text = "BACK",
@@ -683,16 +751,44 @@ local icon_success = draw_pixel_icon(copy_button, {
 }, Color3.fromRGB(80, 220, 120), 2)
 icon_success.Visible = false
 
-local lines_info = create_instance("TextLabel", {
+local info_container = create_instance("Frame", {
     Parent = code_top_bar,
     BackgroundTransparency = 1,
-    Position = UDim2.new(0, 75, 0, 0),
-    Size = UDim2.new(0, 150, 1, 0),
+    Position = UDim2.new(0, 68, 0, 0),
+    Size = UDim2.new(0, 220, 1, 0)
+})
+
+local info_layout = create_instance("UIListLayout", {
+    Parent = info_container,
+    FillDirection = Enum.FillDirection.Horizontal,
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 12)
+})
+
+local lines_info = create_instance("TextLabel", {
+    Parent = info_container,
+    BackgroundTransparency = 1,
+    Size = UDim2.new(0, 0, 1, 0),
+    AutomaticSize = Enum.AutomaticSize.X,
     Font = Enum.Font.Arcade,
     Text = "LINES: 0",
     TextColor3 = current_theme.text,
     TextSize = 14,
-    TextXAlignment = Enum.TextXAlignment.Left
+    TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = 1
+})
+
+local bytes_info = create_instance("TextLabel", {
+    Parent = info_container,
+    BackgroundTransparency = 1,
+    Size = UDim2.new(0, 0, 1, 0),
+    AutomaticSize = Enum.AutomaticSize.X,
+    Font = Enum.Font.Arcade,
+    Text = "BYTES: 0",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = 2
 })
 
 local code_area = create_instance("Frame", {
@@ -709,7 +805,7 @@ local line_numbers_scroll = create_instance("ScrollingFrame", {
     Active = false,
     BackgroundColor3 = current_theme.element_bg,
     BorderSizePixel = 0,
-    Size = UDim2.new(0, 45, 1, 0),
+    Size = UDim2.new(0, 60, 1, 0),
     CanvasSize = UDim2.new(0, 0, 0, 0),
     ScrollBarThickness = 0,
     ScrollingDirection = Enum.ScrollingDirection.Y,
@@ -727,8 +823,8 @@ local code_scroll = create_instance("ScrollingFrame", {
     Active = true,
     BackgroundTransparency = 1,
     BorderSizePixel = 0,
-    Position = UDim2.new(0, 50, 0, 0),
-    Size = UDim2.new(1, -50, 1, 0),
+    Position = UDim2.new(0, 65, 0, 0),
+    Size = UDim2.new(1, -65, 1, 0),
     CanvasSize = UDim2.new(0, 0, 0, 0),
     ScrollBarThickness = 12,
     ScrollBarImageColor3 = current_theme.accent,
@@ -743,6 +839,50 @@ local code_layout = create_instance("UIListLayout", {
     Parent = code_scroll,
     SortOrder = Enum.SortOrder.LayoutOrder
 })
+
+local loading_overlay = create_instance("Frame", {
+    Parent = code_area,
+    BackgroundColor3 = current_theme.bg,
+    BorderSizePixel = 0,
+    Size = UDim2.new(1, 0, 1, 0),
+    ZIndex = 15,
+    Visible = false
+})
+
+local spinner_map = {
+    "000011110000",
+    "001100001100",
+    "010000000010",
+    "100001100001",
+    "100011110001",
+    "100011110001",
+    "100001100001",
+    "010000000010",
+    "001100001100",
+    "000011110000"
+}
+
+local spinner_icon = draw_pixel_icon(loading_overlay, spinner_map, Color3.fromRGB(150, 150, 150), 3)
+spinner_icon.AnchorPoint = Vector2.new(0.5, 0.5)
+spinner_icon.Position = UDim2.new(0.5, 0, 0.5, -20)
+
+local loading_text = create_instance("TextLabel", {
+    Parent = loading_overlay,
+    BackgroundTransparency = 1,
+    Position = UDim2.new(0.5, -100, 0.5, 20),
+    Size = UDim2.new(0, 200, 0, 20),
+    Font = Enum.Font.Arcade,
+    Text = "Loading",
+    TextColor3 = Color3.fromRGB(150, 150, 150),
+    TextSize = 16,
+    TextXAlignment = Enum.TextXAlignment.Center
+})
+
+run_service.RenderStepped:Connect(function(dt)
+    if loading_overlay.Visible then
+        spinner_icon.Rotation = spinner_icon.Rotation + (dt * 180)
+    end
+end)
 
 local settings_back_button = create_instance("TextButton", {
     Parent = settings_container,
@@ -805,7 +945,7 @@ icon_arrow_down.Position = UDim2.new(1, -15, 0.5, 0)
 local checkbox_label = create_instance("TextLabel", {
     Parent = settings_container,
     BackgroundTransparency = 1,
-    Position = UDim2.new(0, 10, 0, 110),
+    Position = UDim2.new(0, 10, 0, 105),
     Size = UDim2.new(1, -50, 0, 20),
     Font = Enum.Font.Arcade,
     Text = "Do not show comments in code",
@@ -819,7 +959,7 @@ local checkbox_frame = create_instance("TextButton", {
     BackgroundColor3 = current_theme.bg,
     BorderColor3 = current_theme.border,
     BorderSizePixel = 1,
-    Position = UDim2.new(1, -30, 0, 110),
+    Position = UDim2.new(1, -30, 0, 105),
     Size = UDim2.new(0, 20, 0, 20),
     Text = "",
     AutoButtonColor = false
@@ -828,6 +968,74 @@ button_colors[checkbox_frame] = current_theme.bg
 
 local checkbox_inner = create_instance("Frame", {
     Parent = checkbox_frame,
+    BackgroundColor3 = current_theme.accent,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0.5, 0, 0.5, 0),
+    Size = UDim2.new(0, 0, 0, 0),
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundTransparency = 1
+})
+
+local checkbox_empty_label = create_instance("TextLabel", {
+    Parent = settings_container,
+    BackgroundTransparency = 1,
+    Position = UDim2.new(0, 10, 0, 130),
+    Size = UDim2.new(1, -50, 0, 20),
+    Font = Enum.Font.Arcade,
+    Text = "Don't show empty scripts",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
+
+local checkbox_empty_frame = create_instance("TextButton", {
+    Parent = settings_container,
+    BackgroundColor3 = current_theme.bg,
+    BorderColor3 = current_theme.border,
+    BorderSizePixel = 1,
+    Position = UDim2.new(1, -30, 0, 130),
+    Size = UDim2.new(0, 20, 0, 20),
+    Text = "",
+    AutoButtonColor = false
+})
+button_colors[checkbox_empty_frame] = current_theme.bg
+
+local checkbox_empty_inner = create_instance("Frame", {
+    Parent = checkbox_empty_frame,
+    BackgroundColor3 = current_theme.accent,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0.5, 0, 0.5, 0),
+    Size = UDim2.new(0, 0, 0, 0),
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundTransparency = 1
+})
+
+local checkbox_active_label = create_instance("TextLabel", {
+    Parent = settings_container,
+    BackgroundTransparency = 1,
+    Position = UDim2.new(0, 10, 0, 155),
+    Size = UDim2.new(1, -50, 0, 20),
+    Font = Enum.Font.Arcade,
+    Text = "Mark active scripts",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
+
+local checkbox_active_frame = create_instance("TextButton", {
+    Parent = settings_container,
+    BackgroundColor3 = current_theme.bg,
+    BorderColor3 = current_theme.border,
+    BorderSizePixel = 1,
+    Position = UDim2.new(1, -30, 0, 155),
+    Size = UDim2.new(0, 20, 0, 20),
+    Text = "",
+    AutoButtonColor = false
+})
+button_colors[checkbox_active_frame] = current_theme.bg
+
+local checkbox_active_inner = create_instance("Frame", {
+    Parent = checkbox_active_frame,
     BackgroundColor3 = current_theme.accent,
     BorderSizePixel = 0,
     Position = UDim2.new(0.5, 0, 0.5, 0),
@@ -880,6 +1088,22 @@ local btn_shiny = create_instance("TextButton", {
     AutoButtonColor = false
 })
 button_colors[btn_shiny] = current_theme.bg
+
+local btn_x2125 = create_instance("TextButton", {
+    Parent = dropdown_list,
+    BackgroundColor3 = current_theme.bg,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 0, 0, 60),
+    Size = UDim2.new(1, 0, 0, 30),
+    Font = Enum.Font.Arcade,
+    Text = " x2125.xyz",
+    TextColor3 = current_theme.text,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 11,
+    AutoButtonColor = false
+})
+button_colors[btn_x2125] = current_theme.bg
 
 code_layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
     local max_width = 0
@@ -949,8 +1173,33 @@ local function make_scrollbar_interactive(scroll_frame)
     end)
 end
 
+local function make_scroll_smooth(scroll_frame)
+    local target_y = scroll_frame.CanvasPosition.Y
+    local is_running = false
+    
+    scroll_frame:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+        if is_running then return end
+        local cy = scroll_frame.CanvasPosition.Y
+        if math.abs(cy - target_y) > 1 then
+            target_y = cy
+        end
+    end)
+    
+    run_service.Heartbeat:Connect(function(dt)
+        local current = scroll_frame.CanvasPosition.Y
+        if math.abs(current - target_y) > 0.5 then
+            is_running = true
+            local next_y = current + (target_y - current) * (1 - math.exp(-15 * dt))
+            scroll_frame.CanvasPosition = Vector2.new(scroll_frame.CanvasPosition.X, next_y)
+            is_running = false
+        end
+    end)
+end
+
 make_scrollbar_interactive(results_scroll)
 make_scrollbar_interactive(code_scroll)
+make_scroll_smooth(results_scroll)
+make_scroll_smooth(code_scroll)
 
 local function animate_button(button)
     local orig = button_colors[button] or button.BackgroundColor3
@@ -991,14 +1240,22 @@ bind_tap(dropdown_main, function()
     
     if is_dropdown_open then
         dropdown_list.Visible = true
-        tween_service:Create(dropdown_list, TweenInfo.new(0.2), {Size = UDim2.new(1, -20, 0, 60)}):Play()
-        tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 165)}):Play()
-        tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 165)}):Play()
+        tween_service:Create(dropdown_list, TweenInfo.new(0.2), {Size = UDim2.new(1, -20, 0, 90)}):Play()
+        tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 190)}):Play()
+        tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 190)}):Play()
+        tween_service:Create(checkbox_empty_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 215)}):Play()
+        tween_service:Create(checkbox_empty_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 215)}):Play()
+        tween_service:Create(checkbox_active_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 240)}):Play()
+        tween_service:Create(checkbox_active_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 240)}):Play()
     else
         local tw = tween_service:Create(dropdown_list, TweenInfo.new(0.2), {Size = UDim2.new(1, -20, 0, 0)})
         tw:Play()
-        tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 110)}):Play()
-        tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 110)}):Play()
+        tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 105)}):Play()
+        tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 105)}):Play()
+        tween_service:Create(checkbox_empty_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 130)}):Play()
+        tween_service:Create(checkbox_empty_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 130)}):Play()
+        tween_service:Create(checkbox_active_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 155)}):Play()
+        tween_service:Create(checkbox_active_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 155)}):Play()
         tw.Completed:Connect(function()
             if not is_dropdown_open then dropdown_list.Visible = false end
         end)
@@ -1016,8 +1273,12 @@ local function select_decompiler(name)
     
     local tw = tween_service:Create(dropdown_list, TweenInfo.new(0.2), {Size = UDim2.new(1, -20, 0, 0)})
     tw:Play()
-    tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 110)}):Play()
-    tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 110)}):Play()
+    tween_service:Create(checkbox_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 105)}):Play()
+    tween_service:Create(checkbox_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 105)}):Play()
+    tween_service:Create(checkbox_empty_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 130)}):Play()
+    tween_service:Create(checkbox_empty_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 130)}):Play()
+    tween_service:Create(checkbox_active_label, TweenInfo.new(0.2), {Position = UDim2.new(0, 10, 0, 155)}):Play()
+    tween_service:Create(checkbox_active_frame, TweenInfo.new(0.2), {Position = UDim2.new(1, -30, 0, 155)}):Play()
     tw.Completed:Connect(function()
         if not is_dropdown_open then dropdown_list.Visible = false end
     end)
@@ -1025,6 +1286,7 @@ end
 
 bind_tap(btn_expert, function() select_decompiler("lua.expert") end)
 bind_tap(btn_shiny, function() select_decompiler("Shiny") end)
+bind_tap(btn_x2125, function() select_decompiler("x2125.xyz") end)
 
 bind_tap(checkbox_frame, function()
     setting_remove_comments = not setting_remove_comments
@@ -1032,6 +1294,24 @@ bind_tap(checkbox_frame, function()
         tween_service:Create(checkbox_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 12, 0, 12), BackgroundTransparency = 0}):Play()
     else
         tween_service:Create(checkbox_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1}):Play()
+    end
+end)
+
+bind_tap(checkbox_empty_frame, function()
+    setting_dont_show_empty = not setting_dont_show_empty
+    if setting_dont_show_empty then
+        tween_service:Create(checkbox_empty_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 12, 0, 12), BackgroundTransparency = 0}):Play()
+    else
+        tween_service:Create(checkbox_empty_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1}):Play()
+    end
+end)
+
+bind_tap(checkbox_active_frame, function()
+    setting_mark_active = not setting_mark_active
+    if setting_mark_active then
+        tween_service:Create(checkbox_active_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 12, 0, 12), BackgroundTransparency = 0}):Play()
+    else
+        tween_service:Create(checkbox_active_inner, TweenInfo.new(0.2), {Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1}):Play()
     end
 end)
 
@@ -1189,33 +1469,78 @@ local function syntax_highlight(text)
 end
 
 local active_decompile_text = ""
+local ui_cache = {}
 
 local function view_code(script_instance)
     results_scroll.Visible = false
     settings_container.Visible = false
     code_view_container.Visible = true
     lines_info.Text = "DECOMPILING..."
+    bytes_info.Text = ""
+    
+    local key = get_cache_key(script_instance)
+    
+    for _, cache_data in pairs(ui_cache) do
+        cache_data.code_container.Parent = nil
+        cache_data.lines_container.Parent = nil
+    end
     
     for _, child in ipairs(code_scroll:GetChildren()) do
-        if child:IsA("Frame") then child:Destroy() end
+        if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
     end
     for _, child in ipairs(line_numbers_scroll:GetChildren()) do
-        if child:IsA("TextLabel") then child:Destroy() end
+        if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
     end
     
     code_scroll.CanvasPosition = Vector2.new(0, 0)
     line_numbers_scroll.CanvasPosition = Vector2.new(0, 0)
     active_decompile_text = ""
     
+    if ui_cache[key] then
+        local cache_data = ui_cache[key]
+        cache_data.code_container.Parent = code_scroll
+        cache_data.lines_container.Parent = line_numbers_scroll
+        lines_info.Text = "LINES: " .. tostring(cache_data.lines_count)
+        bytes_info.Text = "BYTES: " .. tostring(cache_data.bytes_count or 0)
+        active_decompile_text = cache_data.code_text or ""
+        loading_overlay.Visible = false
+        code_scroll.Visible = true
+        line_numbers_scroll.Visible = true
+        return
+    end
+    
+    code_scroll.Visible = false
+    line_numbers_scroll.Visible = false
+    loading_overlay.Visible = true
+    
+    local dots = ""
+    local dot_thread = task.spawn(function()
+        while loading_overlay.Visible do
+            if dots == "..." then
+                dots = ""
+            else
+                dots = dots .. "."
+            end
+            loading_text.Text = "Loading" .. dots
+            task.wait(0.4)
+        end
+    end)
+    
     task.spawn(function()
-        local code = decompile_cache[script_instance]
+        local bytecode_size = 0
+        local success_bc, bytecode = pcall(getscriptbytecode, script_instance)
+        if success_bc and type(bytecode) == "string" then
+            bytecode_size = #bytecode
+        end
+
+        local code = decompile_cache[key]
         if not code then
             local success, source = pcall(do_decompile, script_instance)
             if not success or type(source) ~= "string" or source == "" then
                 source = "-- FAILED TO DECOMPILE OR EMPTY"
             end
             code = source
-            if success then decompile_cache[script_instance] = code end
+            if success then decompile_cache[key] = code end
         end
         
         code = string.gsub(code, "\r", "")
@@ -1237,9 +1562,34 @@ local function view_code(script_instance)
         local lines = string.split(code, "\n")
         local lines_count = #lines
         lines_info.Text = "LINES: " .. tostring(lines_count)
+        bytes_info.Text = "BYTES: " .. tostring(bytecode_size)
         
-        local chunk_size = 50
+        local code_container = create_instance("Frame", {
+            Parent = code_scroll,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 1, 0),
+            AutomaticSize = Enum.AutomaticSize.XY
+        })
+        create_instance("UIListLayout", {
+            Parent = code_container,
+            SortOrder = Enum.SortOrder.LayoutOrder
+        })
+
+        local lines_container = create_instance("Frame", {
+            Parent = line_numbers_scroll,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 1, 0),
+            AutomaticSize = Enum.AutomaticSize.Y
+        })
+        create_instance("UIListLayout", {
+            Parent = lines_container,
+            SortOrder = Enum.SortOrder.LayoutOrder
+        })
+        
+        local chunk_size = 100
         local line_height = text_service:GetTextSize("A", 14, Enum.Font.Arcade, Vector2.new(100000, 100000)).Y
+        local start_time = os.clock()
+        local budget = 0.012
         
         for i = 1, lines_count, chunk_size do
             local chunk_lines = {}
@@ -1254,23 +1604,25 @@ local function view_code(script_instance)
             local nums_chunk = table.concat(chunk_nums, "\n")
             
             create_instance("TextLabel", {
-                Parent = line_numbers_scroll,
+                Parent = lines_container,
                 BackgroundTransparency = 1,
                 AutomaticSize = Enum.AutomaticSize.Y,
-                Size = UDim2.new(1, 0, 0, 0),
+                Size = UDim2.new(1, -5, 0, 0),
                 Font = Enum.Font.Arcade,
                 Text = nums_chunk,
                 TextColor3 = Color3.fromRGB(150, 150, 150),
                 TextSize = 14,
                 TextXAlignment = Enum.TextXAlignment.Right,
-                TextYAlignment = Enum.TextYAlignment.Top
+                TextYAlignment = Enum.TextYAlignment.Top,
+                LayoutOrder = i
             })
             
             local chunk_frame = create_instance("Frame", {
-                Parent = code_scroll,
+                Parent = code_container,
                 BackgroundTransparency = 1,
                 AutomaticSize = Enum.AutomaticSize.XY,
-                Size = UDim2.new(0, 0, 0, 0)
+                Size = UDim2.new(0, 0, 0, 0),
+                LayoutOrder = i
             })
 
             if active_search_terms and #active_search_terms > 0 then
@@ -1323,7 +1675,26 @@ local function view_code(script_instance)
                 TextWrapped = false,
                 ZIndex = 2
             })
+            
+            if os.clock() - start_time > budget then
+                task.wait()
+                start_time = os.clock()
+            end
         end
+        
+        ui_cache[key] = {
+            code_container = code_container,
+            lines_container = lines_container,
+            lines_count = lines_count,
+            bytes_count = bytecode_size,
+            code_text = code
+        }
+        
+        loading_overlay.Visible = false
+        task.cancel(dot_thread)
+        
+        code_scroll.Visible = true
+        line_numbers_scroll.Visible = true
     end)
 end
 
@@ -1350,6 +1721,17 @@ local function perform_search()
     if search_thread then
         task.cancel(search_thread)
     end
+    
+    for _, cache_data in pairs(ui_cache) do
+        if cache_data.code_container then
+            cache_data.code_container:Destroy()
+        end
+        if cache_data.lines_container then
+            cache_data.lines_container:Destroy()
+        end
+    end
+    ui_cache = {}
+    
     for _, child in ipairs(results_scroll:GetChildren()) do
         if child:IsA("Frame") or child:IsA("TextButton") then
             child:Destroy()
@@ -1386,6 +1768,15 @@ local function perform_search()
     search_thread = task.spawn(function()
         local all_scripts_set = {}
         local all_scripts = {}
+
+        local running_scripts = {}
+        if getrunningscripts then
+            pcall(function()
+                for _, s in ipairs(getrunningscripts()) do
+                    running_scripts[s] = true
+                end
+            end)
+        end
 
         local function add_script(scr)
             if typeof(scr) == "Instance" and (scr:IsA("LocalScript") or scr:IsA("ModuleScript") or scr:IsA("Script")) and not all_scripts_set[scr] then
@@ -1429,13 +1820,19 @@ local function perform_search()
                 active_workers = active_workers + 1
                 
                 task.spawn(function()
-                    local code = decompile_cache[script_instance]
+                    local key = get_cache_key(script_instance)
+                    local code = decompile_cache[key]
                     if not code then
                         local ok, res = pcall(do_decompile, script_instance)
                         if ok and type(res) == "string" and #res > 0 then
                             code = res
-                            decompile_cache[script_instance] = code
+                            decompile_cache[key] = code
                         end
+                    end
+                    
+                    if setting_dont_show_empty and is_empty_or_error(code) then
+                        active_workers = active_workers - 1
+                        return
                     end
                     
                     local total_count = 0
@@ -1464,6 +1861,7 @@ local function perform_search()
 
                         local path_text = script_instance:GetFullName()
                         local s_color = type_colors[script_instance.ClassName] or current_theme.text
+                        local is_active = running_scripts[script_instance] == true
 
                         local result_frame = create_instance("Frame", {
                             Name = "Result",
@@ -1516,17 +1914,43 @@ local function perform_search()
                             TextTruncate = Enum.TextTruncate.AtEnd
                         })
 
-                        create_instance("TextLabel", {
-                            Parent = result_frame,
-                            BackgroundTransparency = 1,
-                            Position = UDim2.new(1, -110, 0, 0),
-                            Size = UDim2.new(0, 100, 1, 0),
-                            Font = Enum.Font.Arcade,
-                            Text = tostring(total_count) .. " MATCH",
-                            TextColor3 = current_theme.accent,
-                            TextSize = 12,
-                            TextXAlignment = Enum.TextXAlignment.Right
-                        })
+                        if setting_mark_active and is_active then
+                            create_instance("TextLabel", {
+                                Parent = result_frame,
+                                BackgroundTransparency = 1,
+                                Position = UDim2.new(1, -110, 0, 10),
+                                Size = UDim2.new(0, 100, 0, 14),
+                                Font = Enum.Font.Arcade,
+                                Text = "ACTIVE",
+                                TextColor3 = Color3.fromRGB(50, 140, 70),
+                                TextSize = 12,
+                                TextXAlignment = Enum.TextXAlignment.Right
+                            })
+
+                            create_instance("TextLabel", {
+                                Parent = result_frame,
+                                BackgroundTransparency = 1,
+                                Position = UDim2.new(1, -110, 0, 28),
+                                Size = UDim2.new(0, 100, 0, 14),
+                                Font = Enum.Font.Arcade,
+                                Text = tostring(total_count) .. " MATCH",
+                                TextColor3 = current_theme.accent,
+                                TextSize = 12,
+                                TextXAlignment = Enum.TextXAlignment.Right
+                            })
+                        else
+                            create_instance("TextLabel", {
+                                Parent = result_frame,
+                                BackgroundTransparency = 1,
+                                Position = UDim2.new(1, -110, 0, 0),
+                                Size = UDim2.new(0, 100, 1, 0),
+                                Font = Enum.Font.Arcade,
+                                Text = tostring(total_count) .. " MATCH",
+                                TextColor3 = current_theme.accent,
+                                TextSize = 12,
+                                TextXAlignment = Enum.TextXAlignment.Right
+                            })
+                        end
 
                         local click_btn = create_instance("TextButton", {
                             Parent = result_frame,
