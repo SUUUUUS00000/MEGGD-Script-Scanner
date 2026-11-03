@@ -5,10 +5,12 @@ local OPCODE_COUNT = 95
 local TEXT_FIELDS = {"const_words", "debug_words", "import_words", "table_words", "class_words"}
 
 local function varint(s, pos)
-    local result, shift = 0, 0
+    local result = 0
+    local shift = 0
     local b
     repeat
         b = s:byte(pos)
+        if not b then error("eof") end
         pos = pos + 1
         result = result + (b % 128) * 2 ^ shift
         shift = shift + 7
@@ -17,54 +19,84 @@ local function varint(s, pos)
 end
 
 local function skip_varint(s, pos)
-    local _, np = varint(s, pos)
-    return np
+    local dummy
+    local newpos
+    dummy, newpos = varint(s, pos)
+    return newpos
 end
 
 local function u32(s, pos)
     local b1, b2, b3, b4 = s:byte(pos, pos + 3)
+    if not b1 then error("eof u32") end
     return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+end
+
+local function shr(x, n)
+    return math.floor(x / (2 ^ n))
+end
+
+local function lowbits(x, n)
+    return x % (2 ^ n)
 end
 
 local function f32(s, pos)
     local bits = u32(s, pos)
-    local sign = bits >> 31
-    local exp = (bits >> 23) & 0xFF
-    local mant = bits & 0x7FFFFF
-    if exp == 0xFF then
-        if mant == 0 then return sign == 1 and -math.huge or math.huge end
-        return 0/0
+    local sign = shr(bits, 31)
+    local exp = lowbits(shr(bits, 23), 8)
+    local mant = lowbits(bits, 23)
+    if exp == 255 then
+        if mant == 0 then
+            if sign == 1 then return -math.huge end
+            return math.huge
+        end
+        return 0 / 0
     end
-    if exp == 0 then exp = -126 else mant = mant + 0x800000; exp = exp - 127 end
+    if exp == 0 then
+        exp = -126
+    else
+        mant = mant + 8388608
+        exp = exp - 127
+    end
     local v = mant * 2 ^ (exp - 23)
-    return sign == 1 and -v or v
+    if sign == 1 then return -v end
+    return v
 end
 
 local function f64(s, pos)
     local lo = u32(s, pos)
     local hi = u32(s, pos + 4)
-    local sign = (hi >> 31) & 1
-    local exp = (hi >> 20) & 0x7FF
-    local mant = ((hi & 0xFFFFF) * 2 ^ 32) + lo
-    if exp == 0x7FF then
-        if mant == 0 then return sign == 1 and -math.huge or math.huge end
-        return 0/0
+    local sign = shr(hi, 31)
+    local exp = lowbits(shr(hi, 20), 11)
+    local mant = lowbits(hi, 20) * 4294967296 + lo
+    if exp == 2047 then
+        if mant == 0 then
+            if sign == 1 then return -math.huge end
+            return math.huge
+        end
+        return 0 / 0
     end
-    if exp == 0 then exp = -1022 else mant = mant + 2 ^ 52; exp = exp - 1023 end
+    if exp == 0 then
+        exp = -1022
+    else
+        mant = mant + 2 ^ 52
+        exp = exp - 1023
+    end
     local v = mant * 2 ^ (exp - 52)
-    return sign == 1 and -v or v
+    if sign == 1 then return -v end
+    return v
 end
 
 local function push_split(words, str)
     words[#words + 1] = str:lower()
-    local expanded = str:gsub("(%l)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2"):gsub("_", " ")
+    local expanded = str:gsub("(%l)(%u)", "%1 %2")
+    expanded = expanded:gsub("(%u)(%u%l)", "%1 %2")
+    expanded = expanded:gsub("_", " ")
     for part in expanded:gmatch("[%w]+") do
         words[#words + 1] = part:lower()
     end
 end
 
-local function push_num(words, nums, v)
-    words[#words + 1] = tostring(v)
+local function push_num(nums, v)
     nums[#nums + 1] = v
 end
 
@@ -166,16 +198,26 @@ local LBF_NAMES = {
 local function opcodes_valid(insns, encoded)
     for i = 1, #insns do
         local op = insns[i] % 256
-        if encoded then op = (op * 203) % 256 end
-        if op >= OPCODE_COUNT then return false end
+        if encoded then
+            op = (op * 203) % 256
+        end
+        if op >= OPCODE_COUNT then
+            return false
+        end
     end
     return true
 end
 
 local function detect_encoding(insns)
-    if #insns == 0 then return nil end
-    if opcodes_valid(insns, false) then return false end
-    if opcodes_valid(insns, true) then return true end
+    if #insns == 0 then
+        return nil
+    end
+    if opcodes_valid(insns, false) then
+        return false
+    end
+    if opcodes_valid(insns, true) then
+        return true
+    end
     return nil
 end
 
@@ -185,68 +227,110 @@ local function extract_insn_tokens(insns, encoded)
     while i <= #insns do
         local insn = insns[i]
         local op = insn % 256
-        if encoded then op = (op * 203) % 256 end
+        if encoded then
+            op = (op * 203) % 256
+        end
 
         local kws = OPCODE_KEYWORDS[op]
         if kws then
-            for k = 1, #kws do words[#words + 1] = kws[k] end
+            for k = 1, #kws do
+                words[#words + 1] = kws[k]
+            end
         end
+
         local by_op = OPCODE_BY_OPERAND[op]
         if by_op then
-            local kw = by_op[(insn >> 16) & 0xFF]
-            if kw then words[#words + 1] = kw end
+            local bfield = lowbits(shr(insn, 16), 8)
+            local kw = by_op[bfield]
+            if kw then
+                words[#words + 1] = kw
+            end
         end
 
-        local a = (insn >> 8) & 0xFF
+        local afield = lowbits(shr(insn, 8), 8)
         if FASTCALL_OPS[op] then
-            local bfid = FASTCALL_K_OPS[op] and (i + 1 <= #insns) and (insns[i + 1] & 0xFF) or a
+            local bfid
+            if FASTCALL_K_OPS[op] and i + 1 <= #insns then
+                bfid = insns[i + 1] % 256
+            else
+                bfid = afield
+            end
             local bfname = LBF_NAMES[bfid]
-            if bfname then words[#words + 1] = bfname end
+            if bfname then
+                words[#words + 1] = bfname
+            end
         end
 
-        if a > 0 then words[#words + 1] = "reg" .. a end
-        local b = (insn >> 16) & 0xFF
-        if b > 0 then words[#words + 1] = "reg" .. b end
-        local c = (insn >> 24) & 0xFF
-        if c > 0 then words[#words + 1] = "reg" .. c end
+        if afield > 0 then
+            words[#words + 1] = "reg" .. afield
+        end
+        local bfield2 = lowbits(shr(insn, 16), 8)
+        if bfield2 > 0 then
+            words[#words + 1] = "reg" .. bfield2
+        end
+        local cfield = lowbits(shr(insn, 24), 8)
+        if cfield > 0 then
+            words[#words + 1] = "reg" .. cfield
+        end
 
-        i = i + (OP_LEN_2[op] and 2 or 1)
+        if OP_LEN_2[op] then
+            i = i + 2
+        else
+            i = i + 1
+        end
     end
     return words
 end
 
 local function parse_bytecode(s)
     local pos = 1
-    local version = s:byte(pos); pos = pos + 1
-    if not version or version == 0 or version > 14 then error("bad version") end
+    local version = s:byte(pos)
+    pos = pos + 1
+    if not version or version == 0 or version > 14 then
+        error("bad version")
+    end
 
     local typesversion = 0
     if version >= 4 then
-        typesversion = s:byte(pos); pos = pos + 1
+        typesversion = s:byte(pos)
+        pos = pos + 1
     end
 
     if typesversion == 3 then
         while true do
-            local tag = s:byte(pos); pos = pos + 1
+            local tag = s:byte(pos)
+            pos = pos + 1
             if tag == 0 then break end
             pos = skip_varint(s, pos)
         end
     end
 
-    local str_count; str_count, pos = varint(s, pos)
+    local str_count
+    str_count, pos = varint(s, pos)
     local strings = {}
     for i = 1, str_count do
-        local len; len, pos = varint(s, pos)
-        if not len or pos + len - 1 > #s then error("truncated") end
+        local len
+        len, pos = varint(s, pos)
+        if not len or pos + len - 1 > #s then
+            error("truncated strings")
+        end
         strings[i] = s:sub(pos, pos + len - 1)
         pos = pos + len
     end
 
-    local proto_count; proto_count, pos = varint(s, pos)
+    local proto_count
+    proto_count, pos = varint(s, pos)
     local has_size = version >= 12
-    local insns, const_words, debug_words, import_words, table_words, class_words, number_words = {}, {}, {}, {}, {}, {}, {}
 
-    for p = 1, proto_count do
+    local insns = {}
+    local const_words = {}
+    local debug_words = {}
+    local import_words = {}
+    local table_words = {}
+    local class_words = {}
+    local number_words = {}
+
+    for proto_idx = 1, proto_count do
         local blob_end = nil
         if has_size then
             local sz
@@ -258,38 +342,53 @@ local function parse_bytecode(s)
         local bp = pos + 4
         if version >= 4 then
             bp = bp + 1
-            local tsize, np = varint(s, bp); bp = np + tsize
+            local tsize
+            tsize, bp = varint(s, bp)
+            bp = bp + tsize
         end
 
-        local insn_count; insn_count, bp = varint(s, bp)
+        local insn_count
+        insn_count, bp = varint(s, bp)
         for i = 1, insn_count do
-            insns[#insns + 1] = u32(s, bp); bp = bp + 4
+            insns[#insns + 1] = u32(s, bp)
+            bp = bp + 4
         end
 
-        local const_count; const_count, bp = varint(s, bp)
+        local const_count
+        const_count, bp = varint(s, bp)
         local const_indices = {}
-        for i = 1, const_count do
-            local ctype = s:byte(bp); bp = bp + 1
+        for ci = 1, const_count do
+            local ctype = s:byte(bp)
+            bp = bp + 1
             if ctype == 0 then
             elseif ctype == 1 then
                 bp = bp + 1
             elseif ctype == 2 then
-                push_num(const_words, number_words, f64(s, bp)); bp = bp + 8
+                push_num(number_words, f64(s, bp))
+                bp = bp + 8
             elseif ctype == 3 then
-                local sidx; sidx, bp = varint(s, bp)
-                const_indices[i] = sidx
-                if strings[sidx] then const_words[#const_words + 1] = strings[sidx] end
+                local sidx
+                sidx, bp = varint(s, bp)
+                const_indices[ci] = sidx
+                if strings[sidx] then
+                    const_words[#const_words + 1] = strings[sidx]
+                end
             elseif ctype == 4 then
-                local iid = u32(s, bp); bp = bp + 4
-                local cnt = (iid >> 30) & 3
-                local ids = {(iid >> 20) & 1023, (iid >> 10) & 1023, iid & 1023}
+                local iid = u32(s, bp)
+                bp = bp + 4
+                local cnt = shr(iid, 30) % 4
+                local ids = { shr(iid, 20) % 1024, shr(iid, 10) % 1024, iid % 1024 }
                 for k = 1, cnt do
-                    if strings[ids[k] + 1] then import_words[#import_words + 1] = strings[ids[k] + 1] end
+                    if strings[ids[k] + 1] then
+                        import_words[#import_words + 1] = strings[ids[k] + 1]
+                    end
                 end
             elseif ctype == 5 then
-                local tcount; tcount, bp = varint(s, bp)
+                local tcount
+                tcount, bp = varint(s, bp)
                 for _ = 1, tcount do
-                    local kidx; kidx, bp = varint(s, bp)
+                    local kidx
+                    kidx, bp = varint(s, bp)
                     if const_indices[kidx + 1] and strings[const_indices[kidx + 1]] then
                         table_words[#table_words + 1] = strings[const_indices[kidx + 1]]
                     end
@@ -298,51 +397,81 @@ local function parse_bytecode(s)
                 bp = skip_varint(s, bp)
             elseif ctype == 7 then
                 for _ = 1, 4 do
-                    push_num(const_words, number_words, f32(s, bp)); bp = bp + 4
+                    push_num(number_words, f32(s, bp))
+                    bp = bp + 4
                 end
             elseif ctype == 8 then
-                local tcount; tcount, bp = varint(s, bp)
+                local tcount
+                tcount, bp = varint(s, bp)
                 for _ = 1, tcount do
-                    local kidx; kidx, bp = varint(s, bp)
+                    local kidx
+                    kidx, bp = varint(s, bp)
                     bp = bp + 4
                     if const_indices[kidx + 1] and strings[const_indices[kidx + 1]] then
                         table_words[#table_words + 1] = strings[const_indices[kidx + 1]]
                     end
                 end
             elseif ctype == 9 then
-                local sign = s:byte(bp); bp = bp + 1
-                local mag; mag, bp = varint(s, bp)
-                push_num(const_words, number_words, sign == 1 and -mag or mag)
+                local sign = s:byte(bp)
+                bp = bp + 1
+                local mag
+                mag, bp = varint(s, bp)
+                if sign == 1 then
+                    push_num(number_words, -mag)
+                else
+                    push_num(number_words, mag)
+                end
             elseif ctype == 10 then
                 for _ = 1, 4 do
-                    push_num(const_words, number_words, f64(s, bp)); bp = bp + 8
+                    push_num(number_words, f64(s, bp))
+                    bp = bp + 8
                 end
             elseif ctype == 11 then
-                local cidx; cidx, bp = varint(s, bp)
-                local pc; pc, bp = varint(s, bp)
-                local mc; mc, bp = varint(s, bp)
-                if strings[cidx] then class_words[#class_words + 1] = strings[cidx] end
+                local cidx
+                cidx, bp = varint(s, bp)
+                local pc
+                pc, bp = varint(s, bp)
+                local mc
+                mc, bp = varint(s, bp)
+                if strings[cidx] then
+                    class_words[#class_words + 1] = strings[cidx]
+                end
                 for _ = 1, pc do
-                    local pidx; pidx, bp = varint(s, bp)
-                    if strings[pidx] then class_words[#class_words + 1] = strings[pidx] end
+                    local pidx
+                    pidx, bp = varint(s, bp)
+                    if strings[pidx] then
+                        class_words[#class_words + 1] = strings[pidx]
+                    end
                 end
                 for _ = 1, mc do
-                    local midx; midx, bp = varint(s, bp)
-                    if strings[midx] then class_words[#class_words + 1] = strings[midx] end
+                    local midx
+                    midx, bp = varint(s, bp)
+                    if strings[midx] then
+                        class_words[#class_words + 1] = strings[midx]
+                    end
                 end
-            else break end
+            else
+                break
+            end
         end
 
-        local child_count; child_count, bp = varint(s, bp)
-        for _ = 1, child_count do bp = skip_varint(s, bp) end
+        local child_count
+        child_count, bp = varint(s, bp)
+        for _ = 1, child_count do
+            bp = skip_varint(s, bp)
+        end
 
         bp = skip_varint(s, bp)
-        local dbgname_idx; dbgname_idx, bp = varint(s, bp)
-        if dbgname_idx > 0 and strings[dbgname_idx] then debug_words[#debug_words + 1] = strings[dbgname_idx] end
+
+        local dbgname_idx
+        dbgname_idx, bp = varint(s, bp)
+        if dbgname_idx > 0 and strings[dbgname_idx] then
+            debug_words[#debug_words + 1] = strings[dbgname_idx]
+        end
 
         if s:byte(bp) == 1 then
             local linegaplog2 = s:byte(bp + 1)
-            local intervals = ((insn_count - 1) >> linegaplog2) + 1
+            local intervals = shr(insn_count - 1, linegaplog2) + 1
             bp = bp + 2 + insn_count + intervals * 4
         else
             bp = bp + 1
@@ -350,52 +479,80 @@ local function parse_bytecode(s)
 
         if s:byte(bp) == 1 then
             bp = bp + 1
-            local lc; lc, bp = varint(s, bp)
+            local lc
+            lc, bp = varint(s, bp)
             for _ = 1, lc do
-                local nidx; nidx, bp = varint(s, bp)
+                local nidx
+                nidx, bp = varint(s, bp)
                 bp = skip_varint(s, bp)
                 bp = skip_varint(s, bp)
                 bp = bp + 1
-                if strings[nidx] then debug_words[#debug_words + 1] = strings[nidx] end
+                if strings[nidx] then
+                    debug_words[#debug_words + 1] = strings[nidx]
+                end
             end
-            local uc; uc, bp = varint(s, bp)
+            local uc
+            uc, bp = varint(s, bp)
             for _ = 1, uc do
-                local nidx; nidx, bp = varint(s, bp)
-                if strings[nidx] then debug_words[#debug_words + 1] = strings[nidx] end
+                local nidx
+                nidx, bp = varint(s, bp)
+                if strings[nidx] then
+                    debug_words[#debug_words + 1] = strings[nidx]
+                end
             end
         else
             bp = bp + 1
         end
 
-        pos = blob_end or bp
+        if blob_end then
+            pos = blob_end
+        else
+            pos = bp
+        end
     end
 
     return {
-        strings=strings, insns=insns, number_words=number_words,
-        const_words=const_words, debug_words=debug_words,
-        import_words=import_words, table_words=table_words, class_words=class_words,
+        strings = strings,
+        insns = insns,
+        number_words = number_words,
+        const_words = const_words,
+        debug_words = debug_words,
+        import_words = import_words,
+        table_words = table_words,
+        class_words = class_words,
     }
 end
 
 local function get_words(bytecode)
     local hit = cache[bytecode]
-    if hit ~= nil then return hit end
+    if hit ~= nil then
+        return hit
+    end
 
     local ok, parsed = pcall(parse_bytecode, bytecode)
-    if not ok then cache[bytecode] = false; return false end
+    if not ok then
+        cache[bytecode] = false
+        return false
+    end
 
     local words = {}
-    for i = 1, #parsed.strings do push_split(words, parsed.strings[i]) end
+    for i = 1, #parsed.strings do
+        push_split(words, parsed.strings[i])
+    end
 
     local encoded = detect_encoding(parsed.insns)
     if encoded ~= nil then
         local kw = extract_insn_tokens(parsed.insns, encoded)
-        for i = 1, #kw do words[#words + 1] = kw[i] end
+        for i = 1, #kw do
+            words[#words + 1] = kw[i]
+        end
     end
 
     for _, field in ipairs(TEXT_FIELDS) do
         local arr = parsed[field]
-        for i = 1, #arr do push_split(words, arr[i]) end
+        for i = 1, #arr do
+            push_split(words, arr[i])
+        end
     end
 
     for i = 1, #parsed.number_words do
@@ -406,32 +563,45 @@ local function get_words(bytecode)
     return words
 end
 
-local function all_terms_present(words, terms)
-    for i = 1, #terms do
-        local term = terms[i]
-        local found = false
-        for j = 1, #words do
-            if words[j]:find(term, 1, true) then found = true; break end
-        end
-        if not found then return false end
-    end
-    return true
-end
-
 function M.filter(bytecodes, terms)
     local matches = {}
     for i = 1, #bytecodes do
         local bc = bytecodes[i]
         if type(bc) == "string" and #bc > 0 then
             local words = get_words(bc)
-            if words and all_terms_present(words, terms) then matches[#matches + 1] = i end
+            if words then
+                local all = true
+                for t = 1, #terms do
+                    local term = terms[t]
+                    local found = false
+                    for w = 1, #words do
+                        if words[w]:find(term, 1, true) then
+                            found = true
+                            break
+                        end
+                    end
+                    if not found then
+                        all = false
+                        break
+                    end
+                end
+                if all then
+                    matches[#matches + 1] = i
+                end
+            end
         end
     end
     return matches
 end
 
-function M.words(bytecode) return get_words(bytecode) end
-function M.clear() cache = {} end
+function M.words(bytecode)
+    return get_words(bytecode)
+end
 
-M.version = "4.1.0"
+function M.clear()
+    cache = {}
+end
+
+M.version = "1.1.6"
+
 return M
