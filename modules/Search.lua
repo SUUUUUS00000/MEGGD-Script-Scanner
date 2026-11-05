@@ -75,573 +75,904 @@ local BUILTIN_NAMES = {
     [131]="buffer.readinteger", [132]="buffer.writeinteger", [133]="table.create", [134]="table.clear",
 }
 
+local byte = string.byte
+local sub = string.sub
+local floor = math.floor
+local sort = table.sort
+local concat = table.concat
+local sfind = string.find
+local smatch = string.match
+
+local function fdiv(a, b)
+    return floor(a / b)
+end
+
 local function varint(s, pos)
-    local result, shift = 0, 0
-    local b
-    repeat
-        b = s:byte(pos)
+    local result, mul = 0, 1
+    while true do
+        local b = byte(s, pos)
         if not b then error("eof") end
         pos = pos + 1
-        result = result + (b % 128) * 2 ^ shift
-        shift = shift + 7
-    until b < 128
-    return result, pos
-end
-
-local function u32(s, pos)
-    local b1, b2, b3, b4 = s:byte(pos, pos + 3)
-    if not b1 or not b2 or not b3 or not b4 then error("eof u32") end
-    return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
-end
-
-local function fdiv(a, b) return math.floor(a / b) end
-
-local function check_mode(insns, encoded)
-    local pc = 1
-    local total = #insns
-    while pc <= total do
-        local op = insns[pc] % 256
-        if encoded then op = (op * 203) % 256 end
-        if op >= OP_COUNT then return false end
-        local name = OP_NAMES[op]
-        if name == nil then return false end
-        pc = pc + (TWO_WORD[name] and 2 or 1)
+        result = result + (b % 128) * mul
+        if b < 128 then return result, pos end
+        mul = mul * 128
     end
-    return pc == total + 1
 end
 
-local function decode_opcodes(insns)
-    if #insns == 0 then return false end
-    if check_mode(insns, false) then return false end
-    if check_mode(insns, true) then return true end
-    return nil
+local TWO_WORD_OP = {}
+for op = 0, OP_COUNT - 1 do
+    local name = OP_NAMES[op]
+    if name and TWO_WORD[name] then
+        TWO_WORD_OP[op] = true
+    end
 end
 
-local function decode_instr(insn, encoded)
-    local op = insn % 256
-    if encoded then op = (op * 203) % 256 end
-    local name = OP_NAMES[op] or "?"
-    local a = fdiv(insn, 256) % 256
-    local b = fdiv(insn, 65536) % 256
-    local c = fdiv(insn, 16777216) % 256
-    return op, name, a, b, c
+local ENCODE_OP = {}
+for i = 0, 255 do
+    ENCODE_OP[i] = (i * 203) % 256
+end
+
+local WRITE_SIMPLE_A = {}
+for _, op in ipairs({
+    2, 3, 4, 5, 6, 7, 9, 12, 13, 15, 17, 19,
+    33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
+    45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
+    64, 66, 71, 72, 81, 82, 83, 90, 91, 93,
+}) do
+    WRITE_SIMPLE_A[op] = true
+end
+
+local RET_SIMPLE_A = {}
+for _, op in ipairs({
+    2, 3, 4, 5, 6, 7, 9, 12, 13, 15, 17, 19,
+    33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
+    45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
+    63, 64, 66, 71, 72, 83, 90, 91, 93,
+}) do
+    RET_SIMPLE_A[op] = true
 end
 
 local function get_string(constants, idx1)
-    if idx1 < 1 or idx1 > #constants then return nil end
     local c = constants[idx1]
-    if c and c.type == 3 then return c.value end
+    if type(c) == "string" then
+        return c
+    end
     return nil
 end
 
 local function decode_import(constants, c)
-    if not c or c.type ~= 4 or not c.import then return nil end
-    local parts = {}
-    for i = 1, #c.import do
-        local s = get_string(constants, c.import[i] + 1)
-        if s then parts[#parts + 1] = s end
+    if type(c) ~= "table" then
+        return nil
     end
-    if #parts == 0 then return nil end
-    return table.concat(parts, ".")
+
+    local path = c.path
+    if path == false then
+        return nil
+    end
+    if path ~= nil then
+        return path
+    end
+
+    local imp = c.import
+    if not imp then
+        c.path = false
+        return nil
+    end
+
+    local parts = {}
+    for i = 1, #imp do
+        local s = get_string(constants, imp[i] + 1)
+        if s then
+            parts[#parts + 1] = s
+        end
+    end
+
+    if #parts == 0 then
+        c.path = false
+        return nil
+    end
+
+    local result = concat(parts, ".")
+    c.path = result
+    return result
 end
 
-local function build_instruction_layout(insns, encoded)
-    local previous, next_pc, starts = {}, {}, {}
+local function build_meta(insns, encoded)
+    local n = #insns
+    local previous, starts = {}, {}
+    local ops, As, Bs, Cs = {}, {}, {}, {}
+
     local pc, prior = 1, nil
-    while pc <= #insns do
+
+    while pc <= n do
+        local insn = insns[pc]
+        local op = insn % 256
+
+        if encoded then
+            op = ENCODE_OP[op]
+        end
+
+        if op >= OP_COUNT then
+            return nil
+        end
+
+        local len = TWO_WORD_OP[op] and 2 or 1
+        if pc + len - 1 > n then
+            return nil
+        end
+
         starts[pc] = true
-        if prior then next_pc[prior] = pc; previous[pc] = prior end
-        local _, name = decode_instr(insns[pc], encoded)
-        local len = TWO_WORD[name] and 2 or 1
-        if pc + len - 1 > #insns then return nil end
+        if prior then
+            previous[pc] = prior
+        end
+
+        ops[pc] = op
+        As[pc] = fdiv(insn, 256) % 256
+        Bs[pc] = fdiv(insn, 65536) % 256
+        Cs[pc] = fdiv(insn, 16777216) % 256
+
         prior = pc
         pc = pc + len
     end
-    return previous, next_pc, starts
+
+    return previous, starts, ops, As, Bs, Cs
 end
 
-local function is_andor_jump(insns, pc, encoded, starts)
-    local insn = insns[pc]
-    local d = fdiv(insn, 65536) % 65536
-    if d >= 32768 then d = d - 65536 end
-    local target = pc + 1 + d
-    local ti = insns[target]
-    if ti and (not starts or starts[target]) then
-        local _, tname, _, _, tc = decode_instr(ti, encoded)
-        if tname == "LOADB" and tc ~= 0 then return true end
-        if tname == "MOVE" then return true end
+local function is_andor_jump(pc, starts, ops, Bs, Cs)
+    local d = Bs[pc] + Cs[pc] * 256
+    if d >= 32768 then
+        d = d - 65536
     end
+
+    local target = pc + 1 + d
+    if starts[target] then
+        local top = ops[target]
+        if top == 3 then
+            return Cs[target] ~= 0
+        end
+        if top == 6 then
+            return true
+        end
+    end
+
     return false
 end
 
-local function is_call_target(insns, pc, len, encoded, reg, starts)
-    local next_pc = pc + len
-    if starts and not starts[next_pc] then return false end
-    local nxt = insns[next_pc]
-    if not nxt then return false end
-    local _, nname, na = decode_instr(nxt, encoded)
-    return (nname == "CALL" or nname == "CALLFB") and na == reg
-end
-
-local function find_return_pattern(insns, pc, a, encoded, constants, previous)
-    local target = a
-    local prev_pc = previous[pc]
-    while prev_pc do
-        local prev = insns[prev_pc]
-        local _, name, pa, pb, pcc = decode_instr(prev, encoded)
-        local writes = false
-        if name == "LOADB" or name == "LOADNIL" or name == "LOADN" or name == "LOADK" or
-           name == "MOVE" or name == "GETGLOBAL" or name == "GETUPVAL" or name == "GETIMPORT" or
-           name == "GETTABLEKS" or name == "GETTABLE" or name == "GETTABLEN" or name == "LOADKX" or
-           name == "GETUDATAKS" or name == "GETPRIVATEFIELD" or name == "GETVARARGS" or
-           name == "NEWTABLE" or name == "DUPTABLE" or name == "NEWCLOSURE" or name == "DUPCLOSURE" or
-           name == "NEWCLASS" or name == "CONSTRUCT" or
-           name == "ADD" or name == "SUB" or name == "MUL" or name == "DIV" or name == "MOD" or name == "POW" or
-           name == "AND" or name == "OR" or name == "CONCAT" or name == "NOT" or name == "MINUS" or name == "LENGTH" or
-           name == "ADDK" or name == "SUBK" or name == "MULK" or name == "DIVK" or name == "MODK" or name == "POWK" or
-           name == "ANDK" or name == "ORK" or name == "SUBRK" or name == "DIVRK" then
-            writes = (pa == target)
-        elseif name == "CALL" or name == "CALLFB" then
-            local nres = pcc - 1
-            if nres == 0 then writes = false
-            elseif nres < 0 then writes = (target >= pa)
-            else writes = (target >= pa and target < pa + nres) end
-        elseif name == "NAMECALL" or name == "NAMECALLUDATA" then
-            writes = (pa == target or pa + 1 == target)
-        end
-        if writes then
-            if name == "LOADB" then
-                if pb == 0 then return "return:false" end
-                if pb == 1 then return "return:true" end
-                return nil
-            elseif name == "LOADNIL" then return "return:nil"
-            elseif name == "CALL" or name == "CALLFB" then return "return:call"
-            elseif name == "MOVE" then target = pb
-            else return nil end
-        end
-        prev_pc = previous[prev_pc]
+local function is_call_target(pc, len, reg, starts, ops, As)
+    local nxt = pc + len
+    if not starts[nxt] then
+        return false
     end
-    return nil
+
+    local op = ops[nxt]
+    return (op == 21 or op == 87) and As[nxt] == reg
 end
 
-local function instruction_writes_register(insns, pc, encoded, target)
-    local insn = insns[pc]
-    if not insn then return false end
-    local _, name, a, b, c = decode_instr(insn, encoded)
-    if name == "LOADNIL" or name == "LOADB" or name == "LOADN" or name == "LOADK" or
-       name == "MOVE" or name == "GETGLOBAL" or name == "GETUPVAL" or name == "GETIMPORT" or
-       name == "GETTABLE" or name == "GETTABLEKS" or name == "GETTABLEN" or name == "GETUDATAKS" or
-       name == "GETPRIVATEFIELD" or name == "LOADKX" or name == "NEWTABLE" or name == "DUPTABLE" or
-       name == "NEWCLOSURE" or name == "DUPCLOSURE" or name == "NEWCLASS" or name == "CONSTRUCT" or
-       name == "ADD" or name == "SUB" or name == "MUL" or name == "DIV" or name == "MOD" or name == "POW" or
-       name == "ADDK" or name == "SUBK" or name == "MULK" or name == "DIVK" or name == "MODK" or name == "POWK" or
-       name == "AND" or name == "OR" or name == "ANDK" or name == "ORK" or name == "CONCAT" or
-       name == "NOT" or name == "MINUS" or name == "LENGTH" or name == "SUBRK" or name == "DIVRK" or
-       name == "IDIV" or name == "IDIVK" then
+local function instruction_writes_register(insns, pc, target, op, a, b, c)
+    if WRITE_SIMPLE_A[op] then
         return target == a
-    elseif name == "NAMECALL" or name == "NAMECALLUDATA" then
+    elseif op == 20 or op == 85 then
         return target == a or target == a + 1
-    elseif name == "CALL" or name == "CALLFB" then
+    elseif op == 21 or op == 87 then
         local nresults = c - 1
-        if nresults == 0 then return false end
+        if nresults == 0 then
+            return false
+        end
         return target >= a and (nresults < 0 or target < a + nresults)
-    elseif name == "GETVARARGS" then
+    elseif op == 63 then
         return target >= a and (b == 0 or target < a + b - 1)
-    elseif name == "FORGLOOP" then
+    elseif op == 58 then
         local aux = insns[pc + 1] or 0
         local count = aux % 256
         return target >= a + 2 and target < a + 3 + count
-    elseif name == "FORNLOOP" then
+    elseif op == 57 then
         return target >= a + 2 and target <= a + 3
-    elseif name == "FORGPREP" or name == "FORGPREP_INEXT" or name == "FORGPREP_NEXT" or name == "FORNPREP" then
+    elseif op == 76 or op == 59 or op == 61 or op == 56 then
         return target >= a and target <= a + 3
     end
+
     return false
 end
 
-local function find_call_pattern(insns, pc, a, encoded, constants, previous)
+local function find_return_pattern(pc, a, ops, As, Bs, Cs, previous)
     local target = a
     local prev_pc = previous[pc]
+
     while prev_pc do
-        local prev = insns[prev_pc]
-        local _, name, pa, pb = decode_instr(prev, encoded)
-        if instruction_writes_register(insns, prev_pc, encoded, target) then
-            if name == "GETTABLEKS" or name == "GETGLOBAL" then
-                local aux = insns[prev_pc + 1] or 0
-                local key = get_string(constants, aux + 1)
-                if key then return "call:" .. key end
+        local op = ops[prev_pc]
+        local pa = As[prev_pc]
+        local pb = Bs[prev_pc]
+        local pcc = Cs[prev_pc]
+
+        local writes = false
+
+        if RET_SIMPLE_A[op] then
+            writes = (pa == target)
+        elseif op == 21 or op == 87 then
+            local nres = pcc - 1
+            if nres == 0 then
+                writes = false
+            elseif nres < 0 then
+                writes = (target >= pa)
+            else
+                writes = (target >= pa and target < pa + nres)
+            end
+        elseif op == 20 or op == 85 then
+            writes = (pa == target or pa + 1 == target)
+        end
+
+        if writes then
+            if op == 3 then
+                if pb == 0 then return "return:false" end
+                if pb == 1 then return "return:true" end
                 return nil
-            elseif name == "GETUDATAKS" then
-                local aux = insns[prev_pc + 1] or 0
-                local key = get_string(constants, (aux % 65536) + 1)
-                if key then return "call:" .. key end
-                return nil
-            elseif name == "GETIMPORT" then
-                local dfield = fdiv(prev, 65536) % 65536
-                local path = decode_import(constants, constants[dfield + 1])
-                if path then
-                    local last = path:match("([^.]+)$") or path
-                    return "call:" .. last
-                end
-                return nil
-            elseif name == "NAMECALL" then
-                local aux = insns[prev_pc + 1] or 0
-                local key = get_string(constants, aux + 1)
-                if key then return "call:" .. key end
-                return nil
-            elseif name == "NAMECALLUDATA" then
-                local aux = insns[prev_pc + 1] or 0
-                local key = get_string(constants, (aux % 65536) + 1)
-                if key then return "call:" .. key end
-                return nil
-            elseif name == "MOVE" then
+            elseif op == 2 then
+                return "return:nil"
+            elseif op == 21 or op == 87 then
+                return "return:call"
+            elseif op == 6 then
                 target = pb
             else
                 return nil
             end
         end
+
         prev_pc = previous[prev_pc]
     end
+
+    return nil
+end
+
+local function find_call_pattern(insns, pc, a, constants, previous, ops, As, Bs, Cs)
+    local target = a
+    local prev_pc = previous[pc]
+
+    while prev_pc do
+        local op = ops[prev_pc]
+        local pa = As[prev_pc]
+        local pb = Bs[prev_pc]
+        local pcc = Cs[prev_pc]
+
+        if instruction_writes_register(insns, prev_pc, target, op, pa, pb, pcc) then
+            if op == 15 or op == 7 then
+                local aux = insns[prev_pc + 1] or 0
+                local key = get_string(constants, aux + 1)
+                if key then
+                    return "call:" .. key
+                end
+                return nil
+            elseif op == 83 then
+                local aux = insns[prev_pc + 1] or 0
+                local key = get_string(constants, (aux % 65536) + 1)
+                if key then
+                    return "call:" .. key
+                end
+                return nil
+            elseif op == 12 then
+                local dfield = Bs[prev_pc] + Cs[prev_pc] * 256
+                local path = decode_import(constants, constants[dfield + 1])
+                if path then
+                    local last = smatch(path, "([^.]+)$") or path
+                    return "call:" .. last
+                end
+                return nil
+            elseif op == 20 then
+                local aux = insns[prev_pc + 1] or 0
+                local key = get_string(constants, aux + 1)
+                if key then
+                    return "call:" .. key
+                end
+                return nil
+            elseif op == 85 then
+                local aux = insns[prev_pc + 1] or 0
+                local key = get_string(constants, (aux % 65536) + 1)
+                if key then
+                    return "call:" .. key
+                end
+                return nil
+            elseif op == 6 then
+                target = pb
+            else
+                return nil
+            end
+        end
+
+        prev_pc = previous[prev_pc]
+    end
+
     return nil
 end
 
 local function parse(bytecode)
     local pos = 1
-    local version = bytecode:byte(pos); pos = pos + 1
-    if not version or version < 3 or (version > 14 and version ~= 100) then error("bad version") end
+    local version = byte(bytecode, pos)
+    pos = pos + 1
+
+    if not version or version < 3 or (version > 14 and version ~= 100) then
+        error("bad version")
+    end
+
     local typesversion = 0
-    if version >= 4 then typesversion = bytecode:byte(pos); pos = pos + 1 end
-    local str_count; str_count, pos = varint(bytecode, pos)
+    if version >= 4 then
+        typesversion = byte(bytecode, pos)
+        pos = pos + 1
+    end
+
+    local str_count
+    str_count, pos = varint(bytecode, pos)
+
     local strings = {}
     for i = 1, str_count do
-        local len; len, pos = varint(bytecode, pos)
-        strings[i] = bytecode:sub(pos, pos + len - 1)
+        local len
+        len, pos = varint(bytecode, pos)
+        strings[i] = sub(bytecode, pos, pos + len - 1)
         pos = pos + len
     end
+
     if typesversion == 3 then
         while true do
-            local tag = bytecode:byte(pos); pos = pos + 1
-            if tag == nil or tag == 0 then break end
-            local _, np = varint(bytecode, pos); pos = np
+            local tag = byte(bytecode, pos)
+            pos = pos + 1
+            if tag == nil or tag == 0 then
+                break
+            end
+            local _, np = varint(bytecode, pos)
+            pos = np
         end
     end
-    local proto_count; proto_count, pos = varint(bytecode, pos)
+
+    local proto_count
+    proto_count, pos = varint(bytecode, pos)
+
     local has_size = version >= 12 or version == 100
     local protos = {}
+
     for pi = 1, proto_count do
         local blob_end
+
         if has_size then
-            local sz; sz, pos = varint(bytecode, pos)
+            local sz
+            sz, pos = varint(bytecode, pos)
             blob_end = pos + sz
-            if blob_end > #bytecode then break end
+            if blob_end > #bytecode then
+                break
+            end
         end
+
         local bp = pos + 4
-        local is_vararg = bytecode:byte(pos + 3) ~= 0
+
         if version >= 4 then
             bp = bp + 1
-            local tsize, np = varint(bytecode, bp); bp = np + tsize
+            local tsize, np = varint(bytecode, bp)
+            bp = np + tsize
         end
-        local insn_count; insn_count, bp = varint(bytecode, bp)
+
+        local insn_count
+        insn_count, bp = varint(bytecode, bp)
+
         local insns = {}
-        for i = 1, insn_count do insns[i] = u32(bytecode, bp); bp = bp + 4 end
-        local const_count; const_count, bp = varint(bytecode, bp)
+        for i = 1, insn_count do
+            local b1, b2, b3, b4 = byte(bytecode, bp, bp + 3)
+            if not b1 or not b2 or not b3 or not b4 then
+                error("eof u32")
+            end
+            insns[i] = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+            bp = bp + 4
+        end
+
+        local const_count
+        const_count, bp = varint(bytecode, bp)
+
         local constants = {}
+        local proto_strings = {}
+
         for ci = 1, const_count do
-            local ctype = bytecode:byte(bp); bp = bp + 1
-            local c = {type = ctype}
+            local ctype = byte(bytecode, bp)
+            bp = bp + 1
+
             if ctype == 0 then
-            elseif ctype == 1 then c.value = bytecode:byte(bp) ~= 0; bp = bp + 1
-            elseif ctype == 2 then bp = bp + 8
+            elseif ctype == 1 then
+                bp = bp + 1
+            elseif ctype == 2 then
+                bp = bp + 8
             elseif ctype == 3 then
-                local sidx; sidx, bp = varint(bytecode, bp)
-                c.value = strings[sidx]
+                local sidx
+                sidx, bp = varint(bytecode, bp)
+                local sv = strings[sidx]
+                if sv ~= nil then
+                    constants[ci] = sv
+                    if #sv > 0 then
+                        proto_strings[#proto_strings + 1] = sv
+                    end
+                end
             elseif ctype == 4 then
-                local iid = u32(bytecode, bp); bp = bp + 4
+                local b1, b2, b3, b4 = byte(bytecode, bp, bp + 3)
+                if not b1 or not b2 or not b3 or not b4 then
+                    error("eof u32")
+                end
+
+                local iid = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+                bp = bp + 4
+
                 local cnt = fdiv(iid, 1073741824) % 4
-                local ids = {fdiv(iid, 1048576) % 1024, fdiv(iid, 1024) % 1024, iid % 1024}
-                c.import = {}
-                for k = 1, cnt do c.import[k] = ids[k] end
+                local imp = {}
+
+                if cnt >= 1 then
+                    imp[1] = fdiv(iid, 1048576) % 1024
+                end
+                if cnt >= 2 then
+                    imp[2] = fdiv(iid, 1024) % 1024
+                end
+                if cnt >= 3 then
+                    imp[3] = iid % 1024
+                end
+
+                constants[ci] = { import = imp }
             elseif ctype == 5 then
-                local n; n, bp = varint(bytecode, bp)
-                for _ = 1, n do local _, np = varint(bytecode, bp); bp = np end
-            elseif ctype == 6 then local _, np = varint(bytecode, bp); bp = np
-            elseif ctype == 7 then bp = bp + 16
+                local n
+                n, bp = varint(bytecode, bp)
+                for _ = 1, n do
+                    local _, np = varint(bytecode, bp)
+                    bp = np
+                end
+            elseif ctype == 6 then
+                local _, np = varint(bytecode, bp)
+                bp = np
+            elseif ctype == 7 then
+                bp = bp + 16
             elseif ctype == 8 then
-                local n; n, bp = varint(bytecode, bp)
-                for _ = 1, n do local _, np = varint(bytecode, bp); bp = np + 4 end
+                local n
+                n, bp = varint(bytecode, bp)
+                for _ = 1, n do
+                    local _, np = varint(bytecode, bp)
+                    bp = np + 4
+                end
             elseif ctype == 9 then
                 bp = bp + 1
-                local _, np = varint(bytecode, bp); bp = np
-            elseif ctype == 10 then bp = bp + 32
+                local _, np = varint(bytecode, bp)
+                bp = np
+            elseif ctype == 10 then
+                bp = bp + 32
             elseif ctype == 11 then
-                local _, np = varint(bytecode, bp); bp = np
-                local pc2, np2 = varint(bytecode, bp); bp = np2
-                local mc, np3 = varint(bytecode, bp); bp = np3
-                for _ = 1, pc2 do local _, np4 = varint(bytecode, bp); bp = np4 end
-                for _ = 1, mc do local _, np5 = varint(bytecode, bp); bp = np5 end
-            else break end
-            constants[ci] = c
+                local _, np = varint(bytecode, bp)
+                bp = np
+                local pc2, np2 = varint(bytecode, bp)
+                bp = np2
+                local mc, np3 = varint(bytecode, bp)
+                bp = np3
+                for _ = 1, pc2 do
+                    local _, np4 = varint(bytecode, bp)
+                    bp = np4
+                end
+                for _ = 1, mc do
+                    local _, np5 = varint(bytecode, bp)
+                    bp = np5
+                end
+            else
+                break
+            end
         end
-        local child_count; child_count, bp = varint(bytecode, bp)
-        for _ = 1, child_count do local _, np = varint(bytecode, bp); bp = np end
-        local _, np2 = varint(bytecode, bp); bp = np2
-        local _, np3 = varint(bytecode, bp); bp = np3
-        if bytecode:byte(bp) == 1 then
-            local linegap = bytecode:byte(bp + 1)
+
+        local child_count
+        child_count, bp = varint(bytecode, bp)
+        for _ = 1, child_count do
+            local _, np = varint(bytecode, bp)
+            bp = np
+        end
+
+        local _, np2 = varint(bytecode, bp)
+        bp = np2
+        local _, np3 = varint(bytecode, bp)
+        bp = np3
+
+        if byte(bytecode, bp) == 1 then
+            local linegap = byte(bytecode, bp + 1)
             local intervals = 1
-            if insn_count > 0 then intervals = fdiv(insn_count - 1, 2 ^ linegap) + 1 end
+            if insn_count > 0 then
+                intervals = fdiv(insn_count - 1, 2 ^ linegap) + 1
+            end
             bp = bp + 2 + insn_count + intervals * 4
-        else bp = bp + 1 end
-        if bytecode:byte(bp) == 1 then
+        else
             bp = bp + 1
-            local lc; lc, bp = varint(bytecode, bp)
+        end
+
+        if byte(bytecode, bp) == 1 then
+            bp = bp + 1
+            local lc
+            lc, bp = varint(bytecode, bp)
+
             for _ = 1, lc do
-                local _, np4 = varint(bytecode, bp); bp = np4
-                local _, np5 = varint(bytecode, bp); bp = np5
-                local _, np6 = varint(bytecode, bp); bp = np6
+                local _, np4 = varint(bytecode, bp)
+                bp = np4
+                local _, np5 = varint(bytecode, bp)
+                bp = np5
+                local _, np6 = varint(bytecode, bp)
+                bp = np6
                 bp = bp + 1
             end
-            local uc; uc, bp = varint(bytecode, bp)
-            for _ = 1, uc do local _, np7 = varint(bytecode, bp); bp = np7 end
-        else bp = bp + 1 end
+
+            local uc
+            uc, bp = varint(bytecode, bp)
+            for _ = 1, uc do
+                local _, np7 = varint(bytecode, bp)
+                bp = np7
+            end
+        else
+            bp = bp + 1
+        end
+
         if version >= 11 or version == 100 then
-            local fb; fb, bp = varint(bytecode, bp)
+            local fb
+            fb, bp = varint(bytecode, bp)
             for _ = 1, fb do
                 bp = bp + 1
-                local _, np8 = varint(bytecode, bp); bp = np8
+                local _, np8 = varint(bytecode, bp)
+                bp = np8
             end
         end
+
         pos = blob_end or bp
-        protos[pi] = {insns = insns, constants = constants, is_vararg = is_vararg}
+        protos[pi] = {
+            insns = insns,
+            constants = constants,
+            strings = proto_strings,
+        }
     end
-    return {protos = protos, strings = strings}
+
+    return protos
 end
 
 local function extract_proto_patterns(proto, add)
     local insns = proto.insns
     local constants = proto.constants
-    for _, c in ipairs(constants) do
-        if c.type == 3 and c.value and #c.value > 0 then
-            add("string:" .. c.value)
+    local strings = proto.strings
+
+    for i = 1, #strings do
+        add("string:" .. strings[i])
+    end
+
+    if #insns == 0 then
+        return
+    end
+
+    local previous, starts, ops, As, Bs, Cs = build_meta(insns, false)
+
+    if not previous then
+        previous, starts, ops, As, Bs, Cs = build_meta(insns, true)
+        if not previous then
+            return
         end
     end
-    if #insns == 0 then return end
-    local encoded = decode_opcodes(insns)
-    if encoded == nil then return end
-    local previous, _, starts = build_instruction_layout(insns, encoded)
-    if not previous then return end
+
+    local total = #insns
     local pc = 1
-    while pc <= #insns do
-        local insn = insns[pc]
-        local _, name, a, b, c = decode_instr(insn, encoded)
-        if name == "?" then pc = pc + 1
-        else
-            local len = TWO_WORD[name] and 2 or 1
-            local aux = insns[pc + 1] or 0
-            if name == "RETURN" then
-                if b == 1 then
-                    add("return:void")
-                else
-                    local pat = find_return_pattern(insns, pc, a, encoded, constants, previous)
-                    add(pat or "return:value")
-                end
-            elseif name == "CALL" or name == "CALLFB" then
-                local cp = find_call_pattern(insns, pc, a, encoded, constants, previous)
-                if cp then add(cp) end
-            elseif name == "NAMECALL" then
-                local key = get_string(constants, aux + 1)
-                if key and is_call_target(insns, pc, len, encoded, a, starts) then
-                    add("method:" .. key)
-                    add("call:" .. key)
-                end
-            elseif name == "NAMECALLUDATA" then
-                local key = get_string(constants, (aux % 65536) + 1)
-                if key and is_call_target(insns, pc, len, encoded, a, starts) then
-                    add("method:" .. key)
-                    add("call:" .. key)
-                end
-            elseif name == "GETTABLEKS" then
-                local key = get_string(constants, aux + 1)
-                if key and not is_call_target(insns, pc, len, encoded, a, starts) then
-                    add("get:" .. key)
-                end
-            elseif name == "GETUDATAKS" then
-                local key = get_string(constants, (aux % 65536) + 1)
-                if key and not is_call_target(insns, pc, len, encoded, a, starts) then
-                    add("get:" .. key)
-                end
-            elseif name == "SETTABLEKS" then
-                local key = get_string(constants, aux + 1)
-                if key then add("set:" .. key) end
-            elseif name == "SETUDATAKS" then
-                local key = get_string(constants, (aux % 65536) + 1)
-                if key then add("set:" .. key) end
-            elseif name == "GETGLOBAL" then
-                local key = get_string(constants, aux + 1)
-                if key and not is_call_target(insns, pc, len, encoded, a, starts) then
-                    add("get:" .. key)
-                end
-            elseif name == "SETGLOBAL" then
-                local key = get_string(constants, aux + 1)
-                if key then add("set:" .. key) end
-            elseif name == "GETIMPORT" then
-                if not is_call_target(insns, pc, len, encoded, a, starts) then
-                    local dfield = fdiv(insn, 65536) % 65536
-                    local c = constants[dfield + 1]
-                    local path = decode_import(constants, c)
-                    if path then
-                        add("import:" .. path)
-                        add("get:" .. path)
-                    end
-                end
-            elseif name == "FORNPREP" or name == "FORNLOOP" then
-                add("loop:for-num")
-            elseif name == "FORGPREP_NEXT" then
-                add("loop:for-in-next")
-            elseif name == "FORGPREP_INEXT" then
-                add("loop:for-in-inext")
-            elseif name == "FORGPREP" or name == "FORGLOOP" then
-                add("loop:for-in")
-            elseif name == "JUMPBACK" then
-                add("loop:jumpback")
-            elseif name == "JUMPIF" then
-                if is_andor_jump(insns, pc, encoded, starts) then
-                    add("cond:or")
-                else
-                    add("if:then")
-                end
-            elseif name == "JUMPIFNOT" then
-                if is_andor_jump(insns, pc, encoded, starts) then
-                    add("cond:and")
-                else
-                    add("if:then")
-                    add("if:not-then")
-                end
-            elseif name == "JUMPIFEQ" then
-                add("if:eq")
-            elseif name == "JUMPIFNOTEQ" then
-                add("if:ne")
-            elseif name == "JUMPIFLE" then
-                add("if:le")
-            elseif name == "JUMPIFLT" then
-                add("if:lt")
-            elseif name == "JUMPIFNOTLE" then
-                add("if:gt")
-            elseif name == "JUMPIFNOTLT" then
-                add("if:ge")
-            elseif name == "JUMPXEQKNIL" or name == "JUMPXEQKB" or name == "JUMPXEQKN" or name == "JUMPXEQKS" then
-                if fdiv(aux, 2147483648) == 1 then
-                    add("if:ne")
-                else
-                    add("if:eq")
-                end
-            elseif name == "AND" or name == "ANDK" then
-                add("cond:and")
-            elseif name == "OR" or name == "ORK" then
-                add("cond:or")
-            elseif name == "NOT" then
-                add("cond:not")
-            elseif name == "NEWCLOSURE" then
-                add("function:closure")
-            elseif name == "DUPCLOSURE" then
-                add("function:dup")
-            elseif name == "GETVARARGS" then
-                add("vararg:get")
-            elseif name == "NEWTABLE" then
-                add("table:new")
-            elseif name == "DUPTABLE" then
-                add("table:dup")
-            elseif name == "SETLIST" then
-                add("table:setlist")
-            elseif name == "CONCAT" then
-                add("concat")
-            elseif name == "ADD" or name == "ADDK" then
-                add("arith:add")
-            elseif name == "SUB" or name == "SUBK" or name == "SUBRK" then
-                add("arith:sub")
-            elseif name == "MUL" or name == "MULK" then
-                add("arith:mul")
-            elseif name == "DIV" or name == "DIVK" or name == "DIVRK" then
-                add("arith:div")
-            elseif name == "MOD" or name == "MODK" then
-                add("arith:mod")
-            elseif name == "POW" or name == "POWK" then
-                add("arith:pow")
-            elseif name == "IDIV" or name == "IDIVK" then
-                add("arith:idiv")
-            elseif name == "LENGTH" then
-                add("arith:length")
-            elseif name == "FASTCALL" or name == "FASTCALL1" or name == "FASTCALL2" or
-                   name == "FASTCALL2K" or name == "FASTCALL3" then
-                local bname = BUILTIN_NAMES[a]
-                if bname then add("call:" .. bname) end
-            elseif name == "FASTPCALL" then
-                if a == 0 then add("call:pcall")
-                elseif a == 1 then add("call:xpcall") end
+
+    while pc <= total do
+        local op = ops[pc]
+        local len = TWO_WORD_OP[op] and 2 or 1
+        local a = As[pc]
+        local b = Bs[pc]
+        local c = Cs[pc]
+        local aux = insns[pc + 1] or 0
+
+        if op == 22 then
+            if b == 1 then
+                add("return:void")
+            else
+                local pat = find_return_pattern(pc, a, ops, As, Bs, Cs, previous)
+                add(pat or "return:value")
             end
-            pc = pc + len
+        elseif op == 21 or op == 87 then
+            local cp = find_call_pattern(insns, pc, a, constants, previous, ops, As, Bs, Cs)
+            if cp then
+                add(cp)
+            end
+        elseif op == 20 then
+            local key = get_string(constants, aux + 1)
+            if key and is_call_target(pc, len, a, starts, ops, As) then
+                add("method:" .. key)
+                add("call:" .. key)
+            end
+        elseif op == 85 then
+            local key = get_string(constants, (aux % 65536) + 1)
+            if key and is_call_target(pc, len, a, starts, ops, As) then
+                add("method:" .. key)
+                add("call:" .. key)
+            end
+        elseif op == 15 then
+            local key = get_string(constants, aux + 1)
+            if key and not is_call_target(pc, len, a, starts, ops, As) then
+                add("get:" .. key)
+            end
+        elseif op == 83 then
+            local key = get_string(constants, (aux % 65536) + 1)
+            if key and not is_call_target(pc, len, a, starts, ops, As) then
+                add("get:" .. key)
+            end
+        elseif op == 16 then
+            local key = get_string(constants, aux + 1)
+            if key then
+                add("set:" .. key)
+            end
+        elseif op == 84 then
+            local key = get_string(constants, (aux % 65536) + 1)
+            if key then
+                add("set:" .. key)
+            end
+        elseif op == 7 then
+            local key = get_string(constants, aux + 1)
+            if key and not is_call_target(pc, len, a, starts, ops, As) then
+                add("get:" .. key)
+            end
+        elseif op == 8 then
+            local key = get_string(constants, aux + 1)
+            if key then
+                add("set:" .. key)
+            end
+        elseif op == 12 then
+            if not is_call_target(pc, len, a, starts, ops, As) then
+                local dfield = b + c * 256
+                local cst = constants[dfield + 1]
+                local path = decode_import(constants, cst)
+                if path then
+                    add("import:" .. path)
+                    add("get:" .. path)
+                end
+            end
+        elseif op == 56 or op == 57 then
+            add("loop:for-num")
+        elseif op == 61 then
+            add("loop:for-in-next")
+        elseif op == 59 then
+            add("loop:for-in-inext")
+        elseif op == 76 or op == 58 then
+            add("loop:for-in")
+        elseif op == 24 then
+            add("loop:jumpback")
+        elseif op == 25 then
+            if is_andor_jump(pc, starts, ops, Bs, Cs) then
+                add("cond:or")
+            else
+                add("if:then")
+            end
+        elseif op == 26 then
+            if is_andor_jump(pc, starts, ops, Bs, Cs) then
+                add("cond:and")
+            else
+                add("if:then")
+                add("if:not-then")
+            end
+        elseif op == 27 then
+            add("if:eq")
+        elseif op == 30 then
+            add("if:ne")
+        elseif op == 28 then
+            add("if:le")
+        elseif op == 29 then
+            add("if:lt")
+        elseif op == 31 then
+            add("if:gt")
+        elseif op == 32 then
+            add("if:ge")
+        elseif op == 77 or op == 78 or op == 79 or op == 80 then
+            if aux >= 2147483648 then
+                add("if:ne")
+            else
+                add("if:eq")
+            end
+        elseif op == 45 or op == 47 then
+            add("cond:and")
+        elseif op == 46 or op == 48 then
+            add("cond:or")
+        elseif op == 50 then
+            add("cond:not")
+        elseif op == 19 then
+            add("function:closure")
+        elseif op == 64 then
+            add("function:dup")
+        elseif op == 63 then
+            add("vararg:get")
+        elseif op == 53 then
+            add("table:new")
+        elseif op == 54 then
+            add("table:dup")
+        elseif op == 55 then
+            add("table:setlist")
+        elseif op == 49 then
+            add("concat")
+        elseif op == 33 or op == 39 then
+            add("arith:add")
+        elseif op == 34 or op == 40 or op == 71 then
+            add("arith:sub")
+        elseif op == 35 or op == 41 then
+            add("arith:mul")
+        elseif op == 36 or op == 42 or op == 72 then
+            add("arith:div")
+        elseif op == 37 or op == 43 then
+            add("arith:mod")
+        elseif op == 38 or op == 44 then
+            add("arith:pow")
+        elseif op == 81 or op == 82 then
+            add("arith:idiv")
+        elseif op == 52 then
+            add("arith:length")
+        elseif op == 68 or op == 73 or op == 74 or op == 75 or op == 60 then
+            local bname = BUILTIN_NAMES[a]
+            if bname then
+                add("call:" .. bname)
+            end
+        elseif op == 89 then
+            if a == 0 then
+                add("call:pcall")
+            elseif a == 1 then
+                add("call:xpcall")
+            end
         end
+
+        pc = pc + len
     end
 end
 
-local function get_patterns(bytecode)
-    if type(bytecode) ~= "string" or #bytecode < 2 then return false end
-    local hit = cache[bytecode]
-    if hit ~= nil then return hit end
-    local ok, parsed = pcall(parse, bytecode)
-    local patterns
-    if ok and parsed then
-        local found, seen = {}, {}
-        local function add(p)
-            if p and #p > 0 and not seen[p] then seen[p] = true; found[#found + 1] = p end
-        end
-        for _, proto in ipairs(parsed.protos) do
-            extract_proto_patterns(proto, add)
-        end
-        if #found > 0 then patterns = found end
+local function get_entry(bytecode)
+    if type(bytecode) ~= "string" or #bytecode < 2 then
+        return false
     end
-    if not patterns or #patterns == 0 then patterns = false end
-    cache[bytecode] = patterns
-    return patterns
+
+    local hit = cache[bytecode]
+    if hit ~= nil then
+        return hit
+    end
+
+    local ok, protos = pcall(parse, bytecode)
+    local found, set = {}, {}
+
+    local function add(p)
+        if p and #p > 0 and not set[p] then
+            set[p] = true
+            found[#found + 1] = p
+        end
+    end
+
+    if ok and protos then
+        for i = 1, #protos do
+            extract_proto_patterns(protos[i], add)
+        end
+    end
+
+    local entry
+    if #found > 0 then
+        entry = {
+            list = found,
+            set = set,
+        }
+    else
+        entry = false
+    end
+
+    cache[bytecode] = entry
+    return entry
+end
+
+local function list_contains(list, needle)
+    for j = 1, #list do
+        if sfind(list[j], needle, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function has_prefix(entry, needle)
+    local sorted = entry.sorted
+
+    if not sorted then
+        local list = entry.list
+        sorted = {}
+        for i = 1, #list do
+            sorted[i] = list[i]
+        end
+        sort(sorted)
+        entry.sorted = sorted
+    end
+
+    local n = #sorted
+    if n == 0 then
+        return false
+    end
+    if needle == "" then
+        return true
+    end
+
+    local lo, hi = 1, n
+    while lo < hi do
+        local mid = fdiv(lo + hi, 2)
+        if sorted[mid] < needle then
+            lo = mid + 1
+        else
+            hi = mid
+        end
+    end
+
+    return sub(sorted[lo], 1, #needle) == needle
 end
 
 function M.filter(bytecodes, terms)
+    local nterms = #terms
+    local prefixes, fragments, needles = {}, {}, {}
+
+    for t = 1, nterms do
+        local term = terms[t]
+
+        if type(term) ~= "string" or #term == 0 then
+            return {}
+        end
+
+        local prefix = sub(term, -1) == "*"
+        local fragment = sub(term, 1, 1) == "~"
+
+        prefixes[t] = prefix
+        fragments[t] = fragment
+        needles[t] = prefix and sub(term, 1, -2) or (fragment and sub(term, 2) or term)
+    end
+
     local matches = {}
+
+    if nterms == 0 then
+        for i = 1, #bytecodes do
+            local bc = bytecodes[i]
+            if type(bc) == "string" and #bc > 0 and get_entry(bc) then
+                matches[#matches + 1] = i
+            end
+        end
+        return matches
+    end
+
     for i = 1, #bytecodes do
         local bc = bytecodes[i]
+
         if type(bc) == "string" and #bc > 0 then
-            local patterns = get_patterns(bc)
-            if patterns then
+            local entry = get_entry(bc)
+
+            if entry then
                 local all = true
-                for t = 1, #terms do
-                    local term = terms[t]
-                    local found = false
-                    if type(term) == "string" and #term > 0 then
-                        local prefix = term:sub(-1) == "*"
-                        local fragment = term:sub(1, 1) == "~"
-                        local needle = prefix and term:sub(1, -2) or (fragment and term:sub(2) or term)
-                        for j = 1, #patterns do
-                            local pattern = patterns[j]
-                            if (prefix and pattern:sub(1, #needle) == needle) or
-                               (fragment and pattern:find(needle, 1, true) ~= nil) or
-                               (not prefix and not fragment and pattern == needle) then
-                                found = true
-                                break
-                            end
-                        end
+
+                for t = 1, nterms do
+                    local needle = needles[t]
+                    local ok
+
+                    if fragments[t] then
+                        ok = list_contains(entry.list, needle)
+                    elseif prefixes[t] then
+                        ok = has_prefix(entry, needle)
+                    else
+                        ok = entry.set[needle] == true
                     end
-                    if not found then all = false; break end
+
+                    if not ok then
+                        all = false
+                        break
+                    end
                 end
-                if all then matches[#matches + 1] = i end
+
+                if all then
+                    matches[#matches + 1] = i
+                end
             end
         end
     end
+
     return matches
 end
 
-function M.words(bytecode) return get_patterns(bytecode) end
-function M.clear() cache = {} end
+function M.words(bytecode)
+    local entry = get_entry(bytecode)
+    return entry and entry.list or false
+end
 
-M.version = "2.4.0"
+function M.clear()
+    cache = {}
+end
+
+M.version = "2.4.1"
 
 return M
