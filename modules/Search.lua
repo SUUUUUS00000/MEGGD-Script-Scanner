@@ -32,6 +32,7 @@ local TWO_WORD = {
     LOADKX=true, FASTCALL2=true, FASTCALL2K=true, FASTCALL3=true, JUMPXEQKNIL=true,
     JUMPXEQKB=true, JUMPXEQKN=true, JUMPXEQKS=true, GETUDATAKS=true, SETUDATAKS=true,
     NAMECALLUDATA=true, NEWCLASSMEMBER=true, CALLFB=true, CMPPROTO=true, NEWCLASS=true,
+    CONSTRUCT=true, GETPRIVATEFIELD=true, SETPRIVATEFIELD=true,
 }
 
 local BUILTIN_NAMES = {
@@ -53,6 +54,25 @@ local BUILTIN_NAMES = {
     [55]="bit32.countlz", [56]="bit32.countrz", [57]="select",
     [58]="rawlen", [59]="bit32.extractk", [60]="getmetatable", [61]="setmetatable",
     [62]="tonumber", [63]="tostring", [64]="bit32.byteswap",
+    [65]="buffer.readi8", [66]="buffer.readu8", [67]="buffer.writeu8",
+    [68]="buffer.readi16", [69]="buffer.readu16", [70]="buffer.writeu16",
+    [71]="buffer.readi32", [72]="buffer.readu32", [73]="buffer.writeu32",
+    [74]="buffer.readf32", [75]="buffer.writef32", [76]="buffer.readf64",
+    [77]="buffer.writef64", [78]="vector.magnitude", [79]="vector.normalize",
+    [80]="vector.cross", [81]="vector.dot", [82]="vector.floor", [83]="vector.ceil",
+    [84]="vector.abs", [85]="vector.sign", [86]="vector.clamp", [87]="vector.min",
+    [88]="vector.max", [89]="math.lerp", [90]="vector.lerp", [91]="math.isnan",
+    [92]="math.isinf", [93]="math.isfinite", [94]="integer.create", [95]="integer.tonumber",
+    [96]="integer.neg", [97]="integer.add", [98]="integer.sub", [99]="integer.mul",
+    [100]="integer.div", [101]="integer.min", [102]="integer.max", [103]="integer.rem",
+    [104]="integer.idiv", [105]="integer.udiv", [106]="integer.urem", [107]="integer.mod",
+    [108]="integer.clamp", [109]="integer.band", [110]="integer.bor", [111]="integer.bnot",
+    [112]="integer.bxor", [113]="integer.lt", [114]="integer.le", [115]="integer.ult",
+    [116]="integer.ule", [117]="integer.gt", [118]="integer.ge", [119]="integer.ugt",
+    [120]="integer.uge", [121]="integer.lshift", [122]="integer.rshift", [123]="integer.arshift",
+    [124]="integer.lrotate", [125]="integer.rrotate", [126]="integer.extract", [127]="integer.btest",
+    [128]="integer.countrz", [129]="integer.countlz", [130]="integer.bswap",
+    [131]="buffer.readinteger", [132]="buffer.writeinteger", [133]="table.create", [134]="table.clear",
 }
 
 local function varint(s, pos)
@@ -125,13 +145,28 @@ local function decode_import(constants, c)
     return table.concat(parts, ".")
 end
 
-local function is_andor_jump(insns, pc, encoded)
+local function build_instruction_layout(insns, encoded)
+    local previous, next_pc, starts = {}, {}, {}
+    local pc, prior = 1, nil
+    while pc <= #insns do
+        starts[pc] = true
+        if prior then next_pc[prior] = pc; previous[pc] = prior end
+        local _, name = decode_instr(insns[pc], encoded)
+        local len = TWO_WORD[name] and 2 or 1
+        if pc + len - 1 > #insns then return nil end
+        prior = pc
+        pc = pc + len
+    end
+    return previous, next_pc, starts
+end
+
+local function is_andor_jump(insns, pc, encoded, starts)
     local insn = insns[pc]
     local d = fdiv(insn, 65536) % 65536
     if d >= 32768 then d = d - 65536 end
     local target = pc + 1 + d
     local ti = insns[target]
-    if ti then
+    if ti and (not starts or starts[target]) then
         local _, tname, _, _, tc = decode_instr(ti, encoded)
         if tname == "LOADB" and tc ~= 0 then return true end
         if tname == "MOVE" then return true end
@@ -139,29 +174,32 @@ local function is_andor_jump(insns, pc, encoded)
     return false
 end
 
-local function is_call_target(insns, pc, len, encoded, reg)
-    local nxt = insns[pc + len]
+local function is_call_target(insns, pc, len, encoded, reg, starts)
+    local next_pc = pc + len
+    if starts and not starts[next_pc] then return false end
+    local nxt = insns[next_pc]
     if not nxt then return false end
     local _, nname, na = decode_instr(nxt, encoded)
-    return (nname == "CALL" or nname == "CALLFB" or nname == "NAMECALL") and na == reg
+    return (nname == "CALL" or nname == "CALLFB") and na == reg
 end
 
-local function find_return_pattern(insns, pc, a, encoded, constants)
+local function find_return_pattern(insns, pc, a, encoded, constants, previous)
     local target = a
-    for back = 1, 20 do
-        local prev_pc = pc - back
-        if prev_pc < 1 then return nil end
+    local prev_pc = previous[pc]
+    while prev_pc do
         local prev = insns[prev_pc]
         local _, name, pa, pb, pcc = decode_instr(prev, encoded)
         local writes = false
         if name == "LOADB" or name == "LOADNIL" or name == "LOADN" or name == "LOADK" or
            name == "MOVE" or name == "GETGLOBAL" or name == "GETUPVAL" or name == "GETIMPORT" or
-           name == "GETTABLEKS" or name == "GETTABLE" or name == "GETTABLEN" or
+           name == "GETTABLEKS" or name == "GETTABLE" or name == "GETTABLEN" or name == "LOADKX" or
+           name == "GETUDATAKS" or name == "GETPRIVATEFIELD" or name == "GETVARARGS" or
            name == "NEWTABLE" or name == "DUPTABLE" or name == "NEWCLOSURE" or name == "DUPCLOSURE" or
+           name == "NEWCLASS" or name == "CONSTRUCT" or
            name == "ADD" or name == "SUB" or name == "MUL" or name == "DIV" or name == "MOD" or name == "POW" or
            name == "AND" or name == "OR" or name == "CONCAT" or name == "NOT" or name == "MINUS" or name == "LENGTH" or
            name == "ADDK" or name == "SUBK" or name == "MULK" or name == "DIVK" or name == "MODK" or name == "POWK" or
-           name == "ANDK" or name == "ORK" or name == "SUBRK" or name == "DIVRK" or name == "GETUDATAKS" then
+           name == "ANDK" or name == "ORK" or name == "SUBRK" or name == "DIVRK" then
             writes = (pa == target)
         elseif name == "CALL" or name == "CALLFB" then
             local nres = pcc - 1
@@ -181,40 +219,88 @@ local function find_return_pattern(insns, pc, a, encoded, constants)
             elseif name == "MOVE" then target = pb
             else return nil end
         end
+        prev_pc = previous[prev_pc]
     end
     return nil
 end
 
-local function find_call_pattern(insns, pc, a, encoded, constants)
+local function instruction_writes_register(insns, pc, encoded, target)
+    local insn = insns[pc]
+    if not insn then return false end
+    local _, name, a, b, c = decode_instr(insn, encoded)
+    if name == "LOADNIL" or name == "LOADB" or name == "LOADN" or name == "LOADK" or
+       name == "MOVE" or name == "GETGLOBAL" or name == "GETUPVAL" or name == "GETIMPORT" or
+       name == "GETTABLE" or name == "GETTABLEKS" or name == "GETTABLEN" or name == "GETUDATAKS" or
+       name == "GETPRIVATEFIELD" or name == "LOADKX" or name == "NEWTABLE" or name == "DUPTABLE" or
+       name == "NEWCLOSURE" or name == "DUPCLOSURE" or name == "NEWCLASS" or name == "CONSTRUCT" or
+       name == "ADD" or name == "SUB" or name == "MUL" or name == "DIV" or name == "MOD" or name == "POW" or
+       name == "ADDK" or name == "SUBK" or name == "MULK" or name == "DIVK" or name == "MODK" or name == "POWK" or
+       name == "AND" or name == "OR" or name == "ANDK" or name == "ORK" or name == "CONCAT" or
+       name == "NOT" or name == "MINUS" or name == "LENGTH" or name == "SUBRK" or name == "DIVRK" or
+       name == "IDIV" or name == "IDIVK" then
+        return target == a
+    elseif name == "NAMECALL" or name == "NAMECALLUDATA" then
+        return target == a or target == a + 1
+    elseif name == "CALL" or name == "CALLFB" then
+        local nresults = c - 1
+        if nresults == 0 then return false end
+        return target >= a and (nresults < 0 or target < a + nresults)
+    elseif name == "GETVARARGS" then
+        return target >= a and (b == 0 or target < a + b - 1)
+    elseif name == "FORGLOOP" then
+        local aux = insns[pc + 1] or 0
+        local count = aux % 256
+        return target >= a + 2 and target < a + 3 + count
+    elseif name == "FORNLOOP" then
+        return target >= a + 2 and target <= a + 3
+    elseif name == "FORGPREP" or name == "FORGPREP_INEXT" or name == "FORGPREP_NEXT" or name == "FORNPREP" then
+        return target >= a and target <= a + 3
+    end
+    return false
+end
+
+local function find_call_pattern(insns, pc, a, encoded, constants, previous)
     local target = a
-    for back = 1, 20 do
-        local prev_pc = pc - back
-        if prev_pc < 1 then return nil end
+    local prev_pc = previous[pc]
+    while prev_pc do
         local prev = insns[prev_pc]
         local _, name, pa, pb = decode_instr(prev, encoded)
-        local writes = false
-        if name == "GETTABLEKS" or name == "GETGLOBAL" or name == "GETIMPORT" or name == "MOVE" or
-           name == "GETTABLE" or name == "GETTABLEN" or name == "GETUPVAL" or name == "GETUDATAKS" then
-            writes = (pa == target)
-        end
-        if writes then
+        if instruction_writes_register(insns, prev_pc, encoded, target) then
             if name == "GETTABLEKS" or name == "GETGLOBAL" then
                 local aux = insns[prev_pc + 1] or 0
                 local key = get_string(constants, aux + 1)
                 if key then return "call:" .. key end
                 return nil
+            elseif name == "GETUDATAKS" then
+                local aux = insns[prev_pc + 1] or 0
+                local key = get_string(constants, (aux % 65536) + 1)
+                if key then return "call:" .. key end
+                return nil
             elseif name == "GETIMPORT" then
                 local dfield = fdiv(prev, 65536) % 65536
-                local c = constants[dfield + 1]
-                local path = decode_import(constants, c)
+                local path = decode_import(constants, constants[dfield + 1])
                 if path then
                     local last = path:match("([^.]+)$") or path
                     return "call:" .. last
                 end
                 return nil
-            elseif name == "MOVE" then target = pb
-            else return nil end
+            elseif name == "NAMECALL" then
+                local aux = insns[prev_pc + 1] or 0
+                local key = get_string(constants, aux + 1)
+                if key then return "call:" .. key end
+                return nil
+            elseif name == "NAMECALLUDATA" then
+                local aux = insns[prev_pc + 1] or 0
+                local key = get_string(constants, (aux % 65536) + 1)
+                if key then return "call:" .. key end
+                return nil
+            elseif name == "MOVE" then
+                target = pb
+            else
+                return nil
+            end
         end
+        prev_pc = previous[prev_pc]
     end
     return nil
 end
@@ -335,48 +421,53 @@ local function extract_proto_patterns(proto, add)
     local insns = proto.insns
     local constants = proto.constants
     for _, c in ipairs(constants) do
-        if c.type == 3 and c.value and #c.value > 0 then add(c.value)
-        elseif c.type == 4 then
-            local path = decode_import(constants, c)
-            if path then add("import:" .. path) end
+        if c.type == 3 and c.value and #c.value > 0 then
+            add("string:" .. c.value)
         end
     end
     if #insns == 0 then return end
     local encoded = decode_opcodes(insns)
-    if encoded == nil then encoded = false end
+    if encoded == nil then return end
+    local previous, _, starts = build_instruction_layout(insns, encoded)
+    if not previous then return end
     local pc = 1
-    local last_pc = #insns
     while pc <= #insns do
         local insn = insns[pc]
-        local op, name, a, b, c = decode_instr(insn, encoded)
+        local _, name, a, b, c = decode_instr(insn, encoded)
         if name == "?" then pc = pc + 1
         else
             local len = TWO_WORD[name] and 2 or 1
             local aux = insns[pc + 1] or 0
             if name == "RETURN" then
                 if b == 1 then
-                    if pc < last_pc then add("return:void") end
+                    add("return:void")
                 else
-                    local pat = find_return_pattern(insns, pc, a, encoded, constants)
+                    local pat = find_return_pattern(insns, pc, a, encoded, constants, previous)
                     add(pat or "return:value")
                 end
             elseif name == "CALL" or name == "CALLFB" then
-                local cp = find_call_pattern(insns, pc, a, encoded, constants)
+                local cp = find_call_pattern(insns, pc, a, encoded, constants, previous)
                 if cp then add(cp) end
             elseif name == "NAMECALL" then
                 local key = get_string(constants, aux + 1)
-                if key then add("method:" .. key); add("call:" .. key) end
+                if key and is_call_target(insns, pc, len, encoded, a, starts) then
+                    add("method:" .. key)
+                    add("call:" .. key)
+                end
             elseif name == "NAMECALLUDATA" then
                 local key = get_string(constants, (aux % 65536) + 1)
-                if key then add("method:" .. key); add("call:" .. key) end
+                if key and is_call_target(insns, pc, len, encoded, a, starts) then
+                    add("method:" .. key)
+                    add("call:" .. key)
+                end
             elseif name == "GETTABLEKS" then
                 local key = get_string(constants, aux + 1)
-                if key and not is_call_target(insns, pc, len, encoded, a) then
+                if key and not is_call_target(insns, pc, len, encoded, a, starts) then
                     add("get:" .. key)
                 end
             elseif name == "GETUDATAKS" then
                 local key = get_string(constants, (aux % 65536) + 1)
-                if key and not is_call_target(insns, pc, len, encoded, a) then
+                if key and not is_call_target(insns, pc, len, encoded, a, starts) then
                     add("get:" .. key)
                 end
             elseif name == "SETTABLEKS" then
@@ -387,18 +478,21 @@ local function extract_proto_patterns(proto, add)
                 if key then add("set:" .. key) end
             elseif name == "GETGLOBAL" then
                 local key = get_string(constants, aux + 1)
-                if key and not is_call_target(insns, pc, len, encoded, a) then
+                if key and not is_call_target(insns, pc, len, encoded, a, starts) then
                     add("get:" .. key)
                 end
             elseif name == "SETGLOBAL" then
                 local key = get_string(constants, aux + 1)
                 if key then add("set:" .. key) end
             elseif name == "GETIMPORT" then
-                if not is_call_target(insns, pc, len, encoded, a) then
+                if not is_call_target(insns, pc, len, encoded, a, starts) then
                     local dfield = fdiv(insn, 65536) % 65536
                     local c = constants[dfield + 1]
                     local path = decode_import(constants, c)
-                    if path then add("get:" .. path) end
+                    if path then
+                        add("import:" .. path)
+                        add("get:" .. path)
+                    end
                 end
             elseif name == "FORNPREP" or name == "FORNLOOP" then
                 add("loop:for-num")
@@ -411,13 +505,13 @@ local function extract_proto_patterns(proto, add)
             elseif name == "JUMPBACK" then
                 add("loop:jumpback")
             elseif name == "JUMPIF" then
-                if is_andor_jump(insns, pc, encoded) then
+                if is_andor_jump(insns, pc, encoded, starts) then
                     add("cond:or")
                 else
                     add("if:then")
                 end
             elseif name == "JUMPIFNOT" then
-                if is_andor_jump(insns, pc, encoded) then
+                if is_andor_jump(insns, pc, encoded, starts) then
                     add("cond:and")
                 else
                     add("if:then")
@@ -478,42 +572,22 @@ local function extract_proto_patterns(proto, add)
             elseif name == "LENGTH" then
                 add("arith:length")
             elseif name == "FASTCALL" or name == "FASTCALL1" or name == "FASTCALL2" or
-                   name == "FASTCALL2K" or name == "FASTCALL3" or name == "FASTPCALL" then
-                local bname = BUILTIN_NAMES[a] or ("builtin" .. tostring(a))
-                add("call:" .. bname)
+                   name == "FASTCALL2K" or name == "FASTCALL3" then
+                local bname = BUILTIN_NAMES[a]
+                if bname then add("call:" .. bname) end
+            elseif name == "FASTPCALL" then
+                if a == 0 then add("call:pcall")
+                elseif a == 1 then add("call:xpcall") end
             end
             pc = pc + len
         end
     end
 end
 
-local function extract_raw_strings(bytecode)
-    local found, seen, cur = {}, {}, {}
-    for i = 1, #bytecode do
-        local b = bytecode:byte(i)
-        if b and b >= 32 and b < 127 then cur[#cur + 1] = string.char(b)
-        else
-            if #cur >= 3 then
-                local s = table.concat(cur)
-                if not seen[s] then seen[s] = true; found[#found + 1] = s end
-            end
-            cur = {}
-        end
-    end
-    if #cur >= 3 then
-        local s = table.concat(cur)
-        if not seen[s] then seen[s] = true; found[#found + 1] = s end
-    end
-    return found
-end
-
 local function get_patterns(bytecode)
+    if type(bytecode) ~= "string" or #bytecode < 2 then return false end
     local hit = cache[bytecode]
     if hit ~= nil then return hit end
-    if type(bytecode) ~= "string" or #bytecode < 2 then
-        cache[bytecode] = false
-        return false
-    end
     local ok, parsed = pcall(parse, bytecode)
     local patterns
     if ok and parsed then
@@ -522,13 +596,11 @@ local function get_patterns(bytecode)
             if p and #p > 0 and not seen[p] then seen[p] = true; found[#found + 1] = p end
         end
         for _, proto in ipairs(parsed.protos) do
-            pcall(extract_proto_patterns, proto, add)
+            extract_proto_patterns(proto, add)
         end
         if #found > 0 then patterns = found end
     end
-    if not patterns or #patterns == 0 then
-        patterns = extract_raw_strings(bytecode)
-    end
+    if not patterns or #patterns == 0 then patterns = false end
     cache[bytecode] = patterns
     return patterns
 end
@@ -544,8 +616,19 @@ function M.filter(bytecodes, terms)
                 for t = 1, #terms do
                     local term = terms[t]
                     local found = false
-                    for j = 1, #patterns do
-                        if patterns[j]:find(term, 1, true) then found = true; break end
+                    if type(term) == "string" and #term > 0 then
+                        local prefix = term:sub(-1) == "*"
+                        local fragment = term:sub(1, 1) == "~"
+                        local needle = prefix and term:sub(1, -2) or (fragment and term:sub(2) or term)
+                        for j = 1, #patterns do
+                            local pattern = patterns[j]
+                            if (prefix and pattern:sub(1, #needle) == needle) or
+                               (fragment and pattern:find(needle, 1, true) ~= nil) or
+                               (not prefix and not fragment and pattern == needle) then
+                                found = true
+                                break
+                            end
+                        end
                     end
                     if not found then all = false; break end
                 end
@@ -559,6 +642,6 @@ end
 function M.words(bytecode) return get_patterns(bytecode) end
 function M.clear() cache = {} end
 
-M.version = "2.2.0"
+M.version = "2.4.0"
 
 return M
