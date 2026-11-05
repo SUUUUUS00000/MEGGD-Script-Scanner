@@ -125,6 +125,27 @@ local function decode_import(constants, c)
     return table.concat(parts, ".")
 end
 
+local function is_andor_jump(insns, pc, encoded)
+    local insn = insns[pc]
+    local d = fdiv(insn, 65536) % 65536
+    if d >= 32768 then d = d - 65536 end
+    local target = pc + 1 + d
+    local ti = insns[target]
+    if ti then
+        local _, tname, _, _, tc = decode_instr(ti, encoded)
+        if tname == "LOADB" and tc ~= 0 then return true end
+        if tname == "MOVE" then return true end
+    end
+    return false
+end
+
+local function is_call_target(insns, pc, len, encoded, reg)
+    local nxt = insns[pc + len]
+    if not nxt then return false end
+    local _, nname, na = decode_instr(nxt, encoded)
+    return (nname == "CALL" or nname == "CALLFB" or nname == "NAMECALL") and na == reg
+end
+
 local function find_return_pattern(insns, pc, a, encoded, constants)
     local target = a
     for back = 1, 20 do
@@ -350,10 +371,14 @@ local function extract_proto_patterns(proto, add)
                 if key then add("method:" .. key); add("call:" .. key) end
             elseif name == "GETTABLEKS" then
                 local key = get_string(constants, aux + 1)
-                if key then add("get:" .. key) end
+                if key and not is_call_target(insns, pc, len, encoded, a) then
+                    add("get:" .. key)
+                end
             elseif name == "GETUDATAKS" then
                 local key = get_string(constants, (aux % 65536) + 1)
-                if key then add("get:" .. key) end
+                if key and not is_call_target(insns, pc, len, encoded, a) then
+                    add("get:" .. key)
+                end
             elseif name == "SETTABLEKS" then
                 local key = get_string(constants, aux + 1)
                 if key then add("set:" .. key) end
@@ -362,10 +387,19 @@ local function extract_proto_patterns(proto, add)
                 if key then add("set:" .. key) end
             elseif name == "GETGLOBAL" then
                 local key = get_string(constants, aux + 1)
-                if key then add("get:" .. key) end
+                if key and not is_call_target(insns, pc, len, encoded, a) then
+                    add("get:" .. key)
+                end
             elseif name == "SETGLOBAL" then
                 local key = get_string(constants, aux + 1)
                 if key then add("set:" .. key) end
+            elseif name == "GETIMPORT" then
+                if not is_call_target(insns, pc, len, encoded, a) then
+                    local dfield = fdiv(insn, 65536) % 65536
+                    local c = constants[dfield + 1]
+                    local path = decode_import(constants, c)
+                    if path then add("get:" .. path) end
+                end
             elseif name == "FORNPREP" or name == "FORNLOOP" then
                 add("loop:for-num")
             elseif name == "FORGPREP_NEXT" then
@@ -377,9 +411,18 @@ local function extract_proto_patterns(proto, add)
             elseif name == "JUMPBACK" then
                 add("loop:jumpback")
             elseif name == "JUMPIF" then
-                add("if:then")
+                if is_andor_jump(insns, pc, encoded) then
+                    add("cond:or")
+                else
+                    add("if:then")
+                end
             elseif name == "JUMPIFNOT" then
-                add("if:not-then")
+                if is_andor_jump(insns, pc, encoded) then
+                    add("cond:and")
+                else
+                    add("if:then")
+                    add("if:not-then")
+                end
             elseif name == "JUMPIFEQ" then
                 add("if:eq")
             elseif name == "JUMPIFNOTEQ" then
@@ -393,7 +436,11 @@ local function extract_proto_patterns(proto, add)
             elseif name == "JUMPIFNOTLT" then
                 add("if:ge")
             elseif name == "JUMPXEQKNIL" or name == "JUMPXEQKB" or name == "JUMPXEQKN" or name == "JUMPXEQKS" then
-                if fdiv(aux, 2147483648) == 1 then add("if:ne") else add("if:eq") end
+                if fdiv(aux, 2147483648) == 1 then
+                    add("if:ne")
+                else
+                    add("if:eq")
+                end
             elseif name == "AND" or name == "ANDK" then
                 add("cond:and")
             elseif name == "OR" or name == "ORK" then
@@ -512,6 +559,6 @@ end
 function M.words(bytecode) return get_patterns(bytecode) end
 function M.clear() cache = {} end
 
-M.version = "2.1.0"
+M.version = "2.2.0"
 
 return M
