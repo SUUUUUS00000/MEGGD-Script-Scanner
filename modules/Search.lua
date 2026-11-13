@@ -20,46 +20,100 @@ local SIMPLE_CLEAR_A = {
     [93]=true,
 }
 
-local OP_PATTERN = {
-    [19]="function:closure",
-    [24]="loop:jumpback",
-    [27]="if:eq",
-    [28]="if:le",
-    [29]="if:lt",
-    [30]="if:ne",
-    [31]="if:gt",
-    [32]="if:ge",
-    [33]="arith:add",
-    [34]="arith:sub",
-    [35]="arith:mul",
-    [36]="arith:div",
-    [37]="arith:mod",
-    [38]="arith:pow",
-    [39]="arith:add",
-    [40]="arith:sub",
-    [41]="arith:mul",
-    [42]="arith:div",
-    [43]="arith:mod",
-    [44]="arith:pow",
-    [45]="cond:and",
-    [46]="cond:or",
-    [47]="cond:and",
-    [48]="cond:or",
-    [49]="concat",
-    [50]="cond:not",
-    [52]="arith:length",
-    [53]="table:new",
-    [54]="table:dup",
-    [55]="table:setlist",
-    [64]="function:dup",
-    [71]="arith:sub",
-    [72]="arith:div",
-    [81]="arith:idiv",
-    [82]="arith:idiv",
+local FAST_PATH_OP = {
+    [0]=true, [1]=true, [4]=true, [5]=true, [9]=true, [10]=true,
+    [11]=true, [13]=true, [14]=true, [17]=true, [18]=true, [19]=true,
+    [23]=true, [24]=true, [27]=true, [28]=true, [29]=true, [30]=true,
+    [31]=true, [32]=true, [33]=true, [34]=true, [35]=true, [36]=true,
+    [37]=true, [38]=true, [39]=true, [40]=true, [41]=true, [42]=true,
+    [43]=true, [44]=true, [45]=true, [46]=true, [47]=true, [48]=true,
+    [49]=true, [50]=true, [51]=true, [52]=true, [53]=true, [54]=true,
+    [55]=true, [62]=true, [64]=true, [65]=true, [66]=true, [67]=true,
+    [69]=true, [70]=true, [71]=true, [72]=true, [81]=true, [82]=true,
+    [88]=true, [90]=true, [91]=true, [92]=true, [93]=true, [94]=true,
 }
 
-local BUILTIN_CALLS = {}
-for id, name in pairs({
+local TAG_STRINGS = {
+    [1]="return:void",
+    [2]="return:value",
+    [3]="return:call",
+    [4]="return:nil",
+    [5]="return:false",
+    [6]="return:true",
+    [7]="if:then",
+    [8]="if:not-then",
+    [9]="cond:and",
+    [10]="cond:or",
+    [11]="cond:not",
+    [12]="if:eq",
+    [13]="if:ne",
+    [14]="if:le",
+    [15]="if:lt",
+    [16]="if:gt",
+    [17]="if:ge",
+    [18]="loop:for-num",
+    [19]="loop:for-in",
+    [20]="loop:for-in-next",
+    [21]="loop:for-in-inext",
+    [22]="loop:jumpback",
+    [23]="function:closure",
+    [24]="function:dup",
+    [25]="vararg:get",
+    [26]="table:new",
+    [27]="table:dup",
+    [28]="table:setlist",
+    [29]="concat",
+    [30]="arith:add",
+    [31]="arith:sub",
+    [32]="arith:mul",
+    [33]="arith:div",
+    [34]="arith:mod",
+    [35]="arith:pow",
+    [36]="arith:idiv",
+    [37]="arith:length",
+    [38]="call:pcall",
+    [39]="call:xpcall",
+}
+
+local OP_TAG_ID = {
+    [19]=23,
+    [24]=22,
+    [27]=12,
+    [28]=14,
+    [29]=15,
+    [30]=13,
+    [31]=16,
+    [32]=17,
+    [33]=30,
+    [34]=31,
+    [35]=32,
+    [36]=33,
+    [37]=34,
+    [38]=35,
+    [39]=30,
+    [40]=31,
+    [41]=32,
+    [42]=33,
+    [43]=34,
+    [44]=35,
+    [45]=9,
+    [46]=10,
+    [47]=9,
+    [48]=10,
+    [49]=29,
+    [50]=11,
+    [52]=37,
+    [53]=26,
+    [54]=27,
+    [55]=28,
+    [64]=24,
+    [71]=31,
+    [72]=33,
+    [81]=36,
+    [82]=36,
+}
+
+local BUILTIN_CALLS = {
     [1]="assert", [2]="math.abs", [3]="math.acos", [4]="math.asin",
     [5]="math.atan2", [6]="math.atan", [7]="math.ceil", [8]="math.cosh",
     [9]="math.cos", [10]="math.deg", [11]="math.exp", [12]="math.floor",
@@ -97,9 +151,30 @@ for id, name in pairs({
     [124]="integer.lrotate", [125]="integer.rrotate", [126]="integer.extract", [127]="integer.btest",
     [128]="integer.countrz", [129]="integer.countlz", [130]="integer.bswap",
     [131]="buffer.readinteger", [132]="buffer.writeinteger", [133]="table.create", [134]="table.clear",
-}) do
-    BUILTIN_CALLS[id] = "call:" .. name
+}
+
+local BUILTIN_LIST = { "pcall", "xpcall" }
+for id, name in pairs(BUILTIN_CALLS) do
+    TAG_STRINGS[100 + id] = "call:" .. name
+    BUILTIN_LIST[#BUILTIN_LIST + 1] = name
 end
+
+local TAG_ID_BY_NAME = {}
+for id, str in pairs(TAG_STRINGS) do
+    TAG_ID_BY_NAME[str] = id
+end
+
+local HINT_TAGS = {
+    string = true,
+    get = true,
+    set = true,
+    method = true,
+    func = true,
+    ["local"] = true,
+    upval = true,
+    call = true,
+    import = true,
+}
 
 local ENCODE_OP = {}
 for i = 0, 255 do
@@ -109,7 +184,7 @@ end
 local byte = string.byte
 local sub = string.sub
 local slower = string.lower
-local sort = table.sort
+local concat = table.concat
 local sfind = string.find
 local smatch = string.match
 local band = bit32.band
@@ -126,7 +201,6 @@ local breadstring = buf_lib and buf_lib.readstring
 local os_clock = os and os.clock
 local task_wait = task and task.wait
 
-local scratch_strings = {}
 local scratch_str_flags = {}
 local scratch_insns = {}
 local scratch_constants = {}
@@ -134,10 +208,19 @@ local scratch_const_sidx = {}
 local scratch_import_gen = {}
 local scratch_import_paths = {}
 local scratch_import_calls = {}
+local scratch_import_sidx = {}
 local scratch_reg_call = {}
 local scratch_reg_ret = {}
+local scratch_imp_seen = {}
+local scratch_tag_seen = tcreate and tcreate(240, 0) or {}
+if not tcreate then
+    for i = 1, 240 do
+        scratch_tag_seen[i] = 0
+    end
+end
 local scratch_max_reg = -1
 local import_gen_counter = 0
+local script_gen_counter = 0
 
 @native
 local function read_varint_tail_buf(buf, pos, len, b0)
@@ -158,6 +241,15 @@ local function read_varint_tail_buf(buf, pos, len, b0)
     end
 end
 
+@native
+local function read_u32_array(buf, bp, count, out)
+    for i = 1, count do
+        out[i] = breadu32(buf, bp)
+        bp = bp + 4
+    end
+    return bp
+end
+
 local function read_varint_tail_str(s, pos, b0)
     local result = b0 - 128
     local mul = 128
@@ -176,21 +268,22 @@ local function read_varint_tail_str(s, pos, b0)
     end
 end
 
-local function decode_import(constants, const_count, idx1, active_imp_gen)
+local function decode_import(constants, const_sidx, const_count, idx1, active_imp_gen)
     if idx1 < 1 or idx1 > const_count then
-        return nil, nil
+        return nil, nil, 0
     end
 
     local import_gen = scratch_import_gen
     local import_paths = scratch_import_paths
     local import_calls = scratch_import_calls
+    local import_sidx = scratch_import_sidx
 
     if import_gen[idx1] == active_imp_gen then
         local cached = import_paths[idx1]
         if not cached then
-            return nil, nil
+            return nil, nil, 0
         end
-        return cached, import_calls[idx1]
+        return cached, import_calls[idx1], import_sidx[idx1]
     end
 
     import_gen[idx1] = active_imp_gen
@@ -198,7 +291,7 @@ local function decode_import(constants, const_count, idx1, active_imp_gen)
     local iid = constants[idx1]
     if type(iid) ~= "number" then
         import_paths[idx1] = false
-        return nil, nil
+        return nil, nil, 0
     end
 
     local cnt = rshift(iid, 30)
@@ -216,33 +309,42 @@ local function decode_import(constants, const_count, idx1, active_imp_gen)
 
     local path
     local last
+    local last_k = 0
     if s1 and s2 and s3 then
         path = s1 .. "." .. s2 .. "." .. s3
         last = s3
+        last_k = k3
     elseif s1 and s2 then
         path = s1 .. "." .. s2
         last = s2
+        last_k = k2
     elseif s1 and s3 then
         path = s1 .. "." .. s3
         last = s3
+        last_k = k3
     elseif s2 and s3 then
         path = s2 .. "." .. s3
         last = s3
+        last_k = k3
     else
         path = s1 or s2 or s3
         last = path
+        last_k = (s1 and k1) or (s2 and k2) or k3
     end
 
     if not path then
         import_paths[idx1] = false
-        return nil, nil
+        return nil, nil, 0
     end
 
     local short = smatch(last, "([^.]+)$") or last
     local call_pat = "call:" .. short
+    local last_sidx = (short == last and last_k >= 1 and last_k <= const_count) and const_sidx[last_k] or 0
+
     import_paths[idx1] = path
     import_calls[idx1] = call_pat
-    return path, call_pat
+    import_sidx[idx1] = last_sidx
+    return path, call_pat, last_sidx
 end
 
 @native
@@ -314,8 +416,7 @@ local function is_call_target(pc, len, reg, total, insns, use_encode)
     return (nop == 21 or nop == 87) and band(rshift(ninsn, 8), 255) == reg
 end
 
-@native
-local function extract_proto(insns, total, constants, const_sidx, const_count, strings, str_flags, has_imports, encoded_mode, set, found, found_n)
+local function extract_proto(insns, total, constants, const_sidx, const_count, strings, str_flags, has_imports, encoded_mode, tag_seen, script_gen, imp_seen, found, found_n)
     if total == 0 then
         return found_n, encoded_mode
     end
@@ -372,13 +473,37 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
 
         local a = band(rshift(insn, 8), 255)
 
-        if op == 22 then
-            local b = band(rshift(insn, 16), 255)
-            local pat = b == 1 and "return:void" or (reg_ret[a] or "return:value")
-            if not set[pat] then
-                set[pat] = true
+        if FAST_PATH_OP[op] then
+            local tid = OP_TAG_ID[op]
+            if tid and tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
                 found_n = found_n + 1
-                found[found_n] = pat
+                found[found_n] = TAG_STRINGS[tid]
+            end
+            if SIMPLE_CLEAR_A[op] then
+                reg_call[a] = nil
+                reg_ret[a] = nil
+            end
+        elseif op == 15 or op == 7 or op == 83 then
+            local aux = insns[pc + 1]
+            local idx1 = (op == 83 and band(aux, 65535) or aux) + 1
+            local key = idx1 <= const_count and constants[idx1]
+            if type(key) == "string" and #key > 0 then
+                local sidx = const_sidx[idx1]
+                if not is_call_target(pc, len, a, total, insns, use_encode) then
+                    if band(str_flags[sidx], 2) == 0 then
+                        str_flags[sidx] = str_flags[sidx] + 2
+                        found_n = found_n + 1
+                        found[found_n] = "get:" .. key
+                    end
+                end
+                reg_call[a] = sidx
+            else
+                reg_call[a] = nil
+            end
+            reg_ret[a] = nil
+            if a > max_reg then
+                max_reg = a
             end
         elseif op == 21 or op == 87 then
             local cp = reg_call[a]
@@ -387,16 +512,31 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                     if band(str_flags[cp], 8) == 0 then
                         str_flags[cp] = str_flags[cp] + 8
                         local cpat = "call:" .. strings[cp]
-                        if not set[cpat] then
-                            set[cpat] = true
+                        local st_id = TAG_ID_BY_NAME[cpat]
+                        if st_id then
+                            if tag_seen[st_id] ~= script_gen then
+                                tag_seen[st_id] = script_gen
+                                found_n = found_n + 1
+                                found[found_n] = TAG_STRINGS[st_id]
+                            end
+                        else
                             found_n = found_n + 1
                             found[found_n] = cpat
                         end
                     end
-                elseif not set[cp] then
-                    set[cp] = true
-                    found_n = found_n + 1
-                    found[found_n] = cp
+                else
+                    local st_id = TAG_ID_BY_NAME[cp]
+                    if st_id then
+                        if tag_seen[st_id] ~= script_gen then
+                            tag_seen[st_id] = script_gen
+                            found_n = found_n + 1
+                            found[found_n] = TAG_STRINGS[st_id]
+                        end
+                    elseif not imp_seen[cp] then
+                        imp_seen[cp] = true
+                        found_n = found_n + 1
+                        found[found_n] = cp
+                    end
                 end
             end
             local c = rshift(insn, 24)
@@ -406,7 +546,7 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                     reg_call[r] = nil
                     reg_ret[r] = nil
                 end
-                reg_ret[a] = "return:call"
+                reg_ret[a] = 3
                 if a > max_reg then
                     max_reg = a
                 end
@@ -417,7 +557,7 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                 local top = a + nres - 1
                 for r = a, top do
                     reg_call[r] = nil
-                    reg_ret[r] = "return:call"
+                    reg_ret[r] = 3
                 end
                 if top > max_reg then
                     max_reg = top
@@ -432,18 +572,20 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                 local fl = str_flags[sidx]
                 if band(fl, 16) == 0 then
                     fl = fl + 16
-                    local mpat = "method:" .. key
-                    if not set[mpat] then
-                        set[mpat] = true
-                        found_n = found_n + 1
-                        found[found_n] = mpat
-                    end
+                    found_n = found_n + 1
+                    found[found_n] = "method:" .. key
                 end
                 if band(fl, 8) == 0 then
                     fl = fl + 8
                     local cpat = "call:" .. key
-                    if not set[cpat] then
-                        set[cpat] = true
+                    local st_id = TAG_ID_BY_NAME[cpat]
+                    if st_id then
+                        if tag_seen[st_id] ~= script_gen then
+                            tag_seen[st_id] = script_gen
+                            found_n = found_n + 1
+                            found[found_n] = TAG_STRINGS[st_id]
+                        end
+                    else
                         found_n = found_n + 1
                         found[found_n] = cpat
                     end
@@ -459,24 +601,36 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
             if a + 1 > max_reg then
                 max_reg = a + 1
             end
-        elseif op == 15 or op == 7 or op == 83 then
-            local aux = insns[pc + 1]
-            local idx1 = (op == 83 and band(aux, 65535) or aux) + 1
-            local key = idx1 <= const_count and constants[idx1]
-            if type(key) == "string" and #key > 0 then
-                local sidx = const_sidx[idx1]
+        elseif op == 6 then
+            local b = band(rshift(insn, 16), 255)
+            reg_call[a] = reg_call[b]
+            reg_ret[a] = reg_ret[b]
+            if a > max_reg then
+                max_reg = a
+            end
+        elseif op == 12 then
+            local dfield = rshift(insn, 16)
+            local path, cpat, last_sidx = decode_import(constants, const_sidx, const_count, dfield + 1, active_imp_gen)
+            if path then
+                local ipat = "import:" .. path
+                if not imp_seen[ipat] then
+                    imp_seen[ipat] = true
+                    found_n = found_n + 1
+                    found[found_n] = ipat
+                end
                 if not is_call_target(pc, len, a, total, insns, use_encode) then
-                    if band(str_flags[sidx], 2) == 0 then
-                        str_flags[sidx] = str_flags[sidx] + 2
-                        local gpat = "get:" .. key
-                        if not set[gpat] then
-                            set[gpat] = true
-                            found_n = found_n + 1
-                            found[found_n] = gpat
-                        end
+                    local gpat = "get:" .. path
+                    if not imp_seen[gpat] then
+                        imp_seen[gpat] = true
+                        found_n = found_n + 1
+                        found[found_n] = gpat
                     end
                 end
-                reg_call[a] = sidx
+                if last_sidx ~= 0 then
+                    reg_call[a] = last_sidx
+                else
+                    reg_call[a] = cpat
+                end
             else
                 reg_call[a] = nil
             end
@@ -492,124 +646,86 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                 local sidx = const_sidx[idx1]
                 if band(str_flags[sidx], 4) == 0 then
                     str_flags[sidx] = str_flags[sidx] + 4
-                    local spat = "set:" .. key
-                    if not set[spat] then
-                        set[spat] = true
-                        found_n = found_n + 1
-                        found[found_n] = spat
-                    end
-                end
-            end
-        elseif op == 86 then
-            if band(rshift(insn, 16), 255) == 0 then
-                local idx1 = insns[pc + 1] + 1
-                local key = idx1 <= const_count and constants[idx1]
-                if type(key) == "string" and #key > 0 then
-                    local sidx = const_sidx[idx1]
-                    if band(str_flags[sidx], 4) == 0 then
-                        str_flags[sidx] = str_flags[sidx] + 4
-                        local spat = "set:" .. key
-                        if not set[spat] then
-                            set[spat] = true
-                            found_n = found_n + 1
-                            found[found_n] = spat
-                        end
-                    end
-                end
-            end
-        elseif op == 12 then
-            local dfield = rshift(insn, 16)
-            local path, cpat = decode_import(constants, const_count, dfield + 1, active_imp_gen)
-            if path then
-                local ipat = "import:" .. path
-                if not set[ipat] then
-                    set[ipat] = true
                     found_n = found_n + 1
-                    found[found_n] = ipat
+                    found[found_n] = "set:" .. key
                 end
-                if not is_call_target(pc, len, a, total, insns, use_encode) then
-                    local gpat = "get:" .. path
-                    if not set[gpat] then
-                        set[gpat] = true
-                        found_n = found_n + 1
-                        found[found_n] = gpat
-                    end
-                end
-                reg_call[a] = cpat
-            else
-                reg_call[a] = nil
             end
-            reg_ret[a] = nil
-            if a > max_reg then
-                max_reg = a
-            end
-        elseif op == 6 then
+        elseif op == 22 then
             local b = band(rshift(insn, 16), 255)
-            reg_call[a] = reg_call[b]
-            reg_ret[a] = reg_ret[b]
-            if a > max_reg then
-                max_reg = a
+            local tid = b == 1 and 1 or (reg_ret[a] or 2)
+            if tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
+                found_n = found_n + 1
+                found[found_n] = TAG_STRINGS[tid]
+            end
+        elseif op == 26 then
+            if is_andor_jump(pc, insn, total, insns, use_encode) then
+                if tag_seen[9] ~= script_gen then
+                    tag_seen[9] = script_gen
+                    found_n = found_n + 1
+                    found[found_n] = "cond:and"
+                end
+            else
+                if tag_seen[7] ~= script_gen then
+                    tag_seen[7] = script_gen
+                    found_n = found_n + 1
+                    found[found_n] = "if:then"
+                end
+                if tag_seen[8] ~= script_gen then
+                    tag_seen[8] = script_gen
+                    found_n = found_n + 1
+                    found[found_n] = "if:not-then"
+                end
+            end
+        elseif op == 25 then
+            local tid = is_andor_jump(pc, insn, total, insns, use_encode) and 10 or 7
+            if tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
+                found_n = found_n + 1
+                found[found_n] = TAG_STRINGS[tid]
             end
         elseif op == 2 then
             reg_call[a] = nil
-            reg_ret[a] = "return:nil"
+            reg_ret[a] = 4
             if a > max_reg then
                 max_reg = a
             end
         elseif op == 3 then
             local b = band(rshift(insn, 16), 255)
             reg_call[a] = nil
-            reg_ret[a] = b == 0 and "return:false" or (b == 1 and "return:true" or nil)
+            reg_ret[a] = b == 0 and 5 or (b == 1 and 6 or nil)
             if a > max_reg then
                 max_reg = a
             end
-        elseif op == 25 then
-            local pat = is_andor_jump(pc, insn, total, insns, use_encode) and "cond:or" or "if:then"
-            if not set[pat] then
-                set[pat] = true
+        elseif op == 68 or op == 73 or op == 74 or op == 75 or op == 60 then
+            local tid = 100 + a
+            local str = TAG_STRINGS[tid]
+            if str and tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
                 found_n = found_n + 1
-                found[found_n] = pat
-            end
-        elseif op == 26 then
-            if is_andor_jump(pc, insn, total, insns, use_encode) then
-                if not set["cond:and"] then
-                    set["cond:and"] = true
-                    found_n = found_n + 1
-                    found[found_n] = "cond:and"
-                end
-            else
-                if not set["if:then"] then
-                    set["if:then"] = true
-                    found_n = found_n + 1
-                    found[found_n] = "if:then"
-                end
-                if not set["if:not-then"] then
-                    set["if:not-then"] = true
-                    found_n = found_n + 1
-                    found[found_n] = "if:not-then"
-                end
+                found[found_n] = str
             end
         elseif op == 77 or op == 78 or op == 79 or op == 80 then
-            local pat = insns[pc + 1] >= 2147483648 and "if:ne" or "if:eq"
-            if not set[pat] then
-                set[pat] = true
+            local tid = insns[pc + 1] >= 2147483648 and 13 or 12
+            if tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
                 found_n = found_n + 1
-                found[found_n] = pat
+                found[found_n] = TAG_STRINGS[tid]
             end
         elseif op == 56 or op == 59 or op == 61 or op == 76 then
-            local pat = op == 56 and "loop:for-num" or (op == 61 and "loop:for-in-next" or (op == 59 and "loop:for-in-inext" or "loop:for-in"))
-            if not set[pat] then
-                set[pat] = true
+            local tid = op == 56 and 18 or (op == 61 and 20 or (op == 59 and 21 or 19))
+            if tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
                 found_n = found_n + 1
-                found[found_n] = pat
+                found[found_n] = TAG_STRINGS[tid]
             end
             for r = a, a + 3 do
                 reg_call[r] = nil
                 reg_ret[r] = nil
             end
         elseif op == 57 then
-            if not set["loop:for-num"] then
-                set["loop:for-num"] = true
+            if tag_seen[18] ~= script_gen then
+                tag_seen[18] = script_gen
                 found_n = found_n + 1
                 found[found_n] = "loop:for-num"
             end
@@ -618,8 +734,8 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
             reg_ret[a + 2] = nil
             reg_ret[a + 3] = nil
         elseif op == 58 then
-            if not set["loop:for-in"] then
-                set["loop:for-in"] = true
+            if tag_seen[19] ~= script_gen then
+                tag_seen[19] = script_gen
                 found_n = found_n + 1
                 found[found_n] = "loop:for-in"
             end
@@ -629,8 +745,8 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                 reg_ret[r] = nil
             end
         elseif op == 63 then
-            if not set["vararg:get"] then
-                set["vararg:get"] = true
+            if tag_seen[25] ~= script_gen then
+                tag_seen[25] = script_gen
                 found_n = found_n + 1
                 found[found_n] = "vararg:get"
             end
@@ -647,37 +763,25 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                     reg_ret[r] = nil
                 end
             end
-        elseif op == 68 or op == 73 or op == 74 or op == 75 or op == 60 then
-            local bcall = BUILTIN_CALLS[a]
-            if bcall and not set[bcall] then
-                set[bcall] = true
-                found_n = found_n + 1
-                found[found_n] = bcall
+        elseif op == 86 then
+            if band(rshift(insn, 16), 255) == 0 then
+                local idx1 = insns[pc + 1] + 1
+                local key = idx1 <= const_count and constants[idx1]
+                if type(key) == "string" and #key > 0 then
+                    local sidx = const_sidx[idx1]
+                    if band(str_flags[sidx], 4) == 0 then
+                        str_flags[sidx] = str_flags[sidx] + 4
+                        found_n = found_n + 1
+                        found[found_n] = "set:" .. key
+                    end
+                end
             end
         elseif op == 89 then
-            if a == 0 then
-                if not set["call:pcall"] then
-                    set["call:pcall"] = true
-                    found_n = found_n + 1
-                    found[found_n] = "call:pcall"
-                end
-            elseif a == 1 then
-                if not set["call:xpcall"] then
-                    set["call:xpcall"] = true
-                    found_n = found_n + 1
-                    found[found_n] = "call:xpcall"
-                end
-            end
-        else
-            local tag = OP_PATTERN[op]
-            if tag and not set[tag] then
-                set[tag] = true
+            local tid = a == 0 and 38 or (a == 1 and 39 or 0)
+            if tid ~= 0 and tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
                 found_n = found_n + 1
-                found[found_n] = tag
-            end
-            if SIMPLE_CLEAR_A[op] then
-                reg_call[a] = nil
-                reg_ret[a] = nil
+                found[found_n] = TAG_STRINGS[tid]
             end
         end
 
@@ -688,8 +792,7 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
     return found_n, encoded_mode
 end
 
-@native
-local function parse_and_extract_buf(bytecode, set, found)
+local function parse_and_extract_buf(bytecode, found)
     local blen = #bytecode
     local buf = bfrom(bytecode)
     local pos = 0
@@ -713,7 +816,7 @@ local function parse_and_extract_buf(bytecode, set, found)
         str_count, pos = read_varint_tail_buf(buf, pos, blen, str_count)
     end
 
-    local strings = scratch_strings
+    local strings = tcreate and tcreate(str_count) or {}
     local str_flags = scratch_str_flags
     for i = 1, str_count do
         local slen = breadu8(buf, pos)
@@ -756,9 +859,23 @@ local function parse_and_extract_buf(bytecode, set, found)
         proto_count, pos = read_varint_tail_buf(buf, pos, blen, proto_count)
     end
 
+    script_gen_counter = script_gen_counter + 1
+    local script_gen = script_gen_counter
+    local tag_seen = scratch_tag_seen
+
+    local imp_seen = scratch_imp_seen
+    if tclear then
+        tclear(imp_seen)
+    else
+        imp_seen = {}
+        scratch_imp_seen = imp_seen
+    end
+
     local has_size = version >= 12 or version == 100
     local found_n = 0
     local encoded_mode = nil
+    local max_const = 0
+    local any_imports = false
     local insns = scratch_insns
     local constants = scratch_constants
     local const_sidx = scratch_const_sidx
@@ -803,16 +920,16 @@ local function parse_and_extract_buf(bytecode, set, found)
             error("eof u32")
         end
 
-        for i = 1, insn_count do
-            insns[i] = breadu32(buf, bp)
-            bp = bp + 4
-        end
+        bp = read_u32_array(buf, bp, insn_count, insns)
 
         local const_count = breadu8(buf, bp)
         if const_count < 128 then
             bp = bp + 1
         else
             const_count, bp = read_varint_tail_buf(buf, bp, limit, const_count)
+        end
+        if const_count > max_const then
+            max_const = const_count
         end
 
         local has_imports = false
@@ -850,12 +967,8 @@ local function parse_and_extract_buf(bytecode, set, found)
                     const_sidx[ci] = sidx
                     if #sv > 0 and band(str_flags[sidx], 1) == 0 then
                         str_flags[sidx] = str_flags[sidx] + 1
-                        local sp = "string:" .. sv
-                        if not set[sp] then
-                            set[sp] = true
-                            found_n = found_n + 1
-                            found[found_n] = sp
-                        end
+                        found_n = found_n + 1
+                        found[found_n] = "string:" .. sv
                     end
                 else
                     constants[ci] = nil
@@ -868,6 +981,7 @@ local function parse_and_extract_buf(bytecode, set, found)
                 constants[ci] = breadu32(buf, bp)
                 const_sidx[ci] = 0
                 has_imports = true
+                any_imports = true
                 bp = bp + 4
             elseif ctype == 5 then
                 constants[ci] = nil
@@ -967,7 +1081,7 @@ local function parse_and_extract_buf(bytecode, set, found)
             end
         end
 
-        found_n, encoded_mode = extract_proto(insns, insn_count, constants, const_sidx, const_count, strings, str_flags, has_imports, encoded_mode, set, found, found_n)
+        found_n, encoded_mode = extract_proto(insns, insn_count, constants, const_sidx, const_count, strings, str_flags, has_imports, encoded_mode, tag_seen, script_gen, imp_seen, found, found_n)
 
         if broken_const then
             if blob_end then
@@ -1009,12 +1123,8 @@ local function parse_and_extract_buf(bytecode, set, found)
                     local dn = strings[didx]
                     if #dn > 0 and band(str_flags[didx], 32) == 0 then
                         str_flags[didx] = str_flags[didx] + 32
-                        local fp = "func:" .. dn
-                        if not set[fp] then
-                            set[fp] = true
-                            found_n = found_n + 1
-                            found[found_n] = fp
-                        end
+                        found_n = found_n + 1
+                        found[found_n] = "func:" .. dn
                     end
                 end
 
@@ -1059,12 +1169,8 @@ local function parse_and_extract_buf(bytecode, set, found)
                                 local vn = strings[vidx]
                                 if #vn > 0 and band(str_flags[vidx], 64) == 0 then
                                     str_flags[vidx] = str_flags[vidx] + 64
-                                    local lp = "local:" .. vn
-                                    if not set[lp] then
-                                        set[lp] = true
-                                        found_n = found_n + 1
-                                        found[found_n] = lp
-                                    end
+                                    found_n = found_n + 1
+                                    found[found_n] = "local:" .. vn
                                 end
                             end
                             local spc = breadu8(buf, bp)
@@ -1100,12 +1206,8 @@ local function parse_and_extract_buf(bytecode, set, found)
                                 local un = strings[uidx]
                                 if #un > 0 and band(str_flags[uidx], 128) == 0 then
                                     str_flags[uidx] = str_flags[uidx] + 128
-                                    local up = "upval:" .. un
-                                    if not set[up] then
-                                        set[up] = true
-                                        found_n = found_n + 1
-                                        found[found_n] = up
-                                    end
+                                    found_n = found_n + 1
+                                    found[found_n] = "upval:" .. un
                                 end
                             end
                         end
@@ -1140,10 +1242,22 @@ local function parse_and_extract_buf(bytecode, set, found)
         end
     end
 
+    for i = 1, max_const do
+        constants[i] = nil
+    end
+    if any_imports then
+        local ipaths = scratch_import_paths
+        local icalls = scratch_import_calls
+        for i = 1, max_const do
+            ipaths[i] = nil
+            icalls[i] = nil
+        end
+    end
+
     return found_n
 end
 
-local function parse_and_extract_str(bytecode, set, found)
+local function parse_and_extract_str(bytecode, found)
     local slen = #bytecode
     local pos = 1
 
@@ -1169,7 +1283,7 @@ local function parse_and_extract_str(bytecode, set, found)
         str_count, pos = read_varint_tail_str(bytecode, pos, str_count)
     end
 
-    local strings = scratch_strings
+    local strings = tcreate and tcreate(str_count) or {}
     local str_flags = scratch_str_flags
     for i = 1, str_count do
         local len = byte(bytecode, pos)
@@ -1218,9 +1332,23 @@ local function parse_and_extract_str(bytecode, set, found)
         proto_count, pos = read_varint_tail_str(bytecode, pos, proto_count)
     end
 
+    script_gen_counter = script_gen_counter + 1
+    local script_gen = script_gen_counter
+    local tag_seen = scratch_tag_seen
+
+    local imp_seen = scratch_imp_seen
+    if tclear then
+        tclear(imp_seen)
+    else
+        imp_seen = {}
+        scratch_imp_seen = imp_seen
+    end
+
     local has_size = version >= 12 or version == 100
     local found_n = 0
     local encoded_mode = nil
+    local max_const = 0
+    local any_imports = false
     local insns = scratch_insns
     local constants = scratch_constants
     local const_sidx = scratch_const_sidx
@@ -1289,6 +1417,9 @@ local function parse_and_extract_str(bytecode, set, found)
         else
             const_count, bp = read_varint_tail_str(bytecode, bp, const_count)
         end
+        if const_count > max_const then
+            max_const = const_count
+        end
 
         local has_imports = false
         local broken_const = false
@@ -1332,12 +1463,8 @@ local function parse_and_extract_str(bytecode, set, found)
                     const_sidx[ci] = sidx
                     if #sv > 0 and band(str_flags[sidx], 1) == 0 then
                         str_flags[sidx] = str_flags[sidx] + 1
-                        local sp = "string:" .. sv
-                        if not set[sp] then
-                            set[sp] = true
-                            found_n = found_n + 1
-                            found[found_n] = sp
-                        end
+                        found_n = found_n + 1
+                        found[found_n] = "string:" .. sv
                     end
                 else
                     constants[ci] = nil
@@ -1351,6 +1478,7 @@ local function parse_and_extract_str(bytecode, set, found)
                 constants[ci] = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
                 const_sidx[ci] = 0
                 has_imports = true
+                any_imports = true
                 bp = bp + 4
             elseif ctype == 5 then
                 constants[ci] = nil
@@ -1480,7 +1608,7 @@ local function parse_and_extract_str(bytecode, set, found)
             end
         end
 
-        found_n, encoded_mode = extract_proto(insns, insn_count, constants, const_sidx, const_count, strings, str_flags, has_imports, encoded_mode, set, found, found_n)
+        found_n, encoded_mode = extract_proto(insns, insn_count, constants, const_sidx, const_count, strings, str_flags, has_imports, encoded_mode, tag_seen, script_gen, imp_seen, found, found_n)
 
         if broken_const then
             if blob_end then
@@ -1531,12 +1659,8 @@ local function parse_and_extract_str(bytecode, set, found)
                     local dn = strings[didx]
                     if #dn > 0 and band(str_flags[didx], 32) == 0 then
                         str_flags[didx] = str_flags[didx] + 32
-                        local fp = "func:" .. dn
-                        if not set[fp] then
-                            set[fp] = true
-                            found_n = found_n + 1
-                            found[found_n] = fp
-                        end
+                        found_n = found_n + 1
+                        found[found_n] = "func:" .. dn
                     end
                 end
 
@@ -1589,12 +1713,8 @@ local function parse_and_extract_str(bytecode, set, found)
                                 local vn = strings[vidx]
                                 if #vn > 0 and band(str_flags[vidx], 64) == 0 then
                                     str_flags[vidx] = str_flags[vidx] + 64
-                                    local lp = "local:" .. vn
-                                    if not set[lp] then
-                                        set[lp] = true
-                                        found_n = found_n + 1
-                                        found[found_n] = lp
-                                    end
+                                    found_n = found_n + 1
+                                    found[found_n] = "local:" .. vn
                                 end
                             end
                             local spc = byte(bytecode, bp)
@@ -1642,12 +1762,8 @@ local function parse_and_extract_str(bytecode, set, found)
                                 local un = strings[uidx]
                                 if #un > 0 and band(str_flags[uidx], 128) == 0 then
                                     str_flags[uidx] = str_flags[uidx] + 128
-                                    local up = "upval:" .. un
-                                    if not set[up] then
-                                        set[up] = true
-                                        found_n = found_n + 1
-                                        found[found_n] = up
-                                    end
+                                    found_n = found_n + 1
+                                    found[found_n] = "upval:" .. un
                                 end
                             end
                         end
@@ -1685,6 +1801,18 @@ local function parse_and_extract_str(bytecode, set, found)
         end
     end
 
+    for i = 1, max_const do
+        constants[i] = nil
+    end
+    if any_imports then
+        local ipaths = scratch_import_paths
+        local icalls = scratch_import_calls
+        for i = 1, max_const do
+            ipaths[i] = nil
+            icalls[i] = nil
+        end
+    end
+
     return found_n
 end
 
@@ -1705,98 +1833,136 @@ local function char_kind(b)
 end
 
 @native
-local function tokenize_into(s, token_set, token_list, token_n)
-    local slen = #s
-    if slen == 0 or slen > 4096 then
-        return token_n
+local function is_token_start(raw_blob, s_pos)
+    local prev_b = byte(raw_blob, s_pos - 1)
+    if prev_b == 0 then
+        local p = s_pos
+        local rlen = #raw_blob
+        while p <= rlen do
+            local ch = byte(raw_blob, p)
+            if ch == 0 then
+                break
+            end
+            if ch == 58 then
+                return false
+            end
+            p = p + 1
+        end
+        return true
     end
 
-    local i = 1
-    while i <= slen do
-        while i <= slen and char_kind(byte(s, i)) < 0 do
-            i = i + 1
-        end
-        if i > slen then
-            break
-        end
-
-        local seg_start = i
-        while i <= slen and char_kind(byte(s, i)) >= 0 do
-            i = i + 1
-        end
-        local seg_end = i - 1
-
-        local whole = slower(sub(s, seg_start, seg_end))
-        if not token_set[whole] then
-            token_set[whole] = true
-            token_n = token_n + 1
-            token_list[token_n] = whole
-        end
-
-        if seg_end > seg_start then
-            local sub_start = seg_start
-            local prev_k = char_kind(byte(s, seg_start))
-            for j = seg_start + 1, seg_end do
-                local k = char_kind(byte(s, j))
-                local split = false
-                if k == 0 and prev_k ~= 0 then
-                    split = true
-                elseif k ~= 0 and prev_k == 0 then
-                    split = true
-                elseif k == 2 then
-                    if prev_k == 1 then
-                        split = true
-                    elseif prev_k == 2 and j < seg_end and char_kind(byte(s, j + 1)) == 1 then
-                        split = true
-                    end
-                end
-                if split then
-                    local part = slower(sub(s, sub_start, j - 1))
-                    if not token_set[part] then
-                        token_set[part] = true
-                        token_n = token_n + 1
-                        token_list[token_n] = part
-                    end
-                    sub_start = j
-                end
-                prev_k = k
-            end
-            if sub_start > seg_start then
-                local tail = slower(sub(s, sub_start, seg_end))
-                if not token_set[tail] then
-                    token_set[tail] = true
-                    token_n = token_n + 1
-                    token_list[token_n] = tail
-                end
-            end
-        end
+    local pk = char_kind(prev_b)
+    if pk < 0 then
+        return true
     end
 
-    return token_n
+    local fk = char_kind(byte(raw_blob, s_pos))
+    if fk < 0 then
+        return true
+    end
+    if fk == 2 then
+        if pk == 1 or pk == 0 then
+            return true
+        end
+        if pk == 2 and s_pos < #raw_blob and char_kind(byte(raw_blob, s_pos + 1)) == 1 then
+            return true
+        end
+        return false
+    end
+    if fk == 0 then
+        return pk > 0
+    end
+    return pk == 0
 end
 
-local function get_tokens(entry)
-    local token_set = entry.token_set
-    if token_set then
-        return token_set
+@native
+local function is_token_end(raw_blob, e_pos)
+    local next_b = byte(raw_blob, e_pos + 1)
+    local nk = char_kind(next_b)
+    if nk < 0 then
+        return true
     end
 
-    token_set = {}
-    local token_list = {}
-    local token_n = 0
-    local list = entry.list
-    local ln = #list
+    local lk = char_kind(byte(raw_blob, e_pos))
+    if lk < 0 then
+        return true
+    end
+    if nk == 2 then
+        if lk == 1 or lk == 0 then
+            return true
+        end
+        if lk == 2 and e_pos + 2 <= #raw_blob and char_kind(byte(raw_blob, e_pos + 2)) == 1 then
+            return true
+        end
+        return false
+    end
+    if nk == 0 then
+        return lk > 0
+    end
+    return lk == 0
+end
 
-    for i = 1, ln do
-        local pat = list[i]
-        local colon = sfind(pat, ":", 1, true)
-        local val = colon and sub(pat, colon + 1) or pat
-        token_n = tokenize_into(val, token_set, token_list, token_n)
+local function get_low_blob(entry)
+    local low_blob = entry.low_blob
+    if not low_blob then
+        low_blob = slower(entry.raw_blob)
+        entry.low_blob = low_blob
+    end
+    return low_blob
+end
+
+local function has_bare_token(entry, lneedle, nlen)
+    local raw_blob = entry.raw_blob
+    local low_blob = get_low_blob(entry)
+    local pos = sfind(low_blob, lneedle, 1, true)
+    while pos do
+        if is_token_start(raw_blob, pos) and is_token_end(raw_blob, pos + nlen - 1) then
+            return true
+        end
+        pos = sfind(low_blob, lneedle, pos + 1, true)
+    end
+    return false
+end
+
+local function has_bare_prefix(entry, lneedle)
+    local raw_blob = entry.raw_blob
+    local low_blob = get_low_blob(entry)
+    local pos = sfind(low_blob, lneedle, 1, true)
+    while pos do
+        if is_token_start(raw_blob, pos) then
+            return true
+        end
+        pos = sfind(low_blob, lneedle, pos + 1, true)
+    end
+    return false
+end
+
+local function has_fragment(entry, needle, lneedle)
+    if sfind(entry.raw_blob, needle, 1, true) then
+        return true
+    end
+    if not smatch(needle, "%a") then
+        return false
+    end
+    return sfind(get_low_blob(entry), lneedle, 1, true) ~= nil
+end
+
+local function parse_and_cache(bytecode)
+    local found = {}
+    local ok, found_n = pcall(parse_and_extract, bytecode, found)
+
+    local entry
+    if ok and found_n and found_n > 0 then
+        entry = {
+            list = found,
+            raw_blob = "\0" .. concat(found, "\0") .. "\0",
+        }
+    else
+        entry = false
     end
 
-    entry.token_set = token_set
-    entry.token_list = token_list
-    return token_set
+    cache[bytecode] = entry
+    return entry
 end
 
 local function get_entry(bytecode)
@@ -1809,120 +1975,76 @@ local function get_entry(bytecode)
         return hit
     end
 
-    local found, set = {}, {}
-    local ok, found_n = pcall(parse_and_extract, bytecode, set, found)
-
-    local entry
-    if ok and found_n and found_n > 0 then
-        entry = {
-            list = found,
-            set = set,
-        }
-    else
-        entry = false
-    end
-
-    cache[bytecode] = entry
-    return entry
+    return parse_and_cache(bytecode)
 end
 
-local function list_contains(list, needle)
-    for j = 1, #list do
-        if sfind(list[j], needle, 1, true) then
+local function longest_dot_segment(val)
+    local best = nil
+    local best_len = 0
+    local start = 1
+    local vlen = #val
+    while start <= vlen do
+        local dot = sfind(val, ".", start, true)
+        local seg_end = dot and (dot - 1) or vlen
+        local seg_len = seg_end - start + 1
+        if seg_len > best_len then
+            best_len = seg_len
+            best = sub(val, start, seg_end)
+        end
+        if not dot then
+            break
+        end
+        start = dot + 1
+    end
+    return best
+end
+
+local function matches_builtin_prefix(val)
+    local vlen = #val
+    for i = 1, #BUILTIN_LIST do
+        local bn = BUILTIN_LIST[i]
+        if #bn >= vlen and sub(bn, 1, vlen) == val then
             return true
         end
     end
     return false
 end
 
-local function entry_contains_fragment(entry, needle, lower_needle)
-    if list_contains(entry.list, needle) then
-        return true
+local function extract_cold_hint(term, is_prefix)
+    local colon = sfind(term, ":", 1, true)
+    if not colon then
+        return nil
     end
-    if not smatch(needle, "%a") then
-        return false
+    local tag = sub(term, 1, colon - 1)
+    if not HINT_TAGS[tag] then
+        return nil
     end
-    local lower_list = entry.lower_list
-    if not lower_list then
-        local list = entry.list
-        local n = #list
-        lower_list = tcreate and tcreate(n) or {}
-        for i = 1, n do
-            lower_list[i] = slower(list[i])
+    local val = sub(term, colon + 1)
+    if #val == 0 then
+        return nil
+    end
+    if tag == "call" then
+        if is_prefix then
+            if matches_builtin_prefix(val) then
+                return nil
+            end
+            return val
         end
-        entry.lower_list = lower_list
-    end
-    return list_contains(lower_list, lower_needle)
-end
-
-local function binary_prefix_search(sorted, needle)
-    local n = #sorted
-    if n == 0 then
-        return false
-    end
-
-    local lo, hi = 1, n
-    while lo < hi do
-        local mid = rshift(lo + hi, 1)
-        if sorted[mid] < needle then
-            lo = mid + 1
-        else
-            hi = mid
+        if TAG_ID_BY_NAME[term] then
+            return nil
         end
+        return val
     end
-
-    local cand = sorted[lo]
-    local nlen = #needle
-    if #cand < nlen then
-        return false
-    end
-    if byte(cand, 1) ~= byte(needle, 1) then
-        return false
-    end
-    if nlen == 1 then
-        return true
-    end
-    if byte(cand, nlen) ~= byte(needle, nlen) then
-        return false
-    end
-    return sub(cand, 1, nlen) == needle
-end
-
-local function has_prefix(entry, needle)
-    if needle == "" then
-        return true
-    end
-    local sorted = entry.sorted
-    if not sorted then
-        local list = entry.list
-        local ln = #list
-        sorted = tcreate and tcreate(ln) or {}
-        for i = 1, ln do
-            sorted[i] = list[i]
+    if tag == "import" or tag == "get" then
+        if sfind(val, ".", 1, true) then
+            if is_prefix then
+                return nil
+            end
+            return longest_dot_segment(val)
         end
-        sort(sorted)
-        entry.sorted = sorted
+        return val
     end
-    return binary_prefix_search(sorted, needle)
-end
-
-local function has_token_prefix(entry, lower_needle)
-    if lower_needle == "" then
-        return true
-    end
-    local sorted = entry.token_sorted
-    if not sorted then
-        get_tokens(entry)
-        local tlist = entry.token_list
-        local ln = #tlist
-        sorted = tcreate and tcreate(ln) or {}
-        for i = 1, ln do
-            sorted[i] = tlist[i]
-        end
-        sort(sorted)
-        entry.token_sorted = sorted
-    end
-    return binary_prefix_search(sorted, lower_needle)
+    return val
 end
 
 local function compile_terms(terms)
@@ -1931,11 +2053,12 @@ local function compile_terms(terms)
     local prefix_needles = {}
     local bare_needles = {}
     local bare_lower = {}
-    local bare_prefix_needles = {}
+    local bare_len = {}
     local bare_prefix_lower = {}
     local frag_needles = {}
     local frag_lower = {}
-    local nexact, nprefix, nbare, nbare_prefix, nfrag = 0, 0, 0, 0, 0
+    local cold_hints = {}
+    local nexact, nprefix, nbare, nbare_prefix, nfrag, nhints = 0, 0, 0, 0, 0, 0
 
     for t = 1, nterms do
         local term = terms[t]
@@ -1955,55 +2078,62 @@ local function compile_terms(terms)
             if #needle > 0 then
                 if sfind(needle, ":", 1, true) then
                     nprefix = nprefix + 1
-                    prefix_needles[nprefix] = needle
+                    prefix_needles[nprefix] = "\0" .. needle
+                    local hint = extract_cold_hint(needle, true)
+                    if hint then
+                        nhints = nhints + 1
+                        cold_hints[nhints] = hint
+                    end
                 else
                     nbare_prefix = nbare_prefix + 1
-                    bare_prefix_needles[nbare_prefix] = needle
                     bare_prefix_lower[nbare_prefix] = slower(needle)
                 end
             end
         else
             if sfind(term, ":", 1, true) then
                 nexact = nexact + 1
-                exact_needles[nexact] = term
+                exact_needles[nexact] = "\0" .. term .. "\0"
+                local hint = extract_cold_hint(term, false)
+                if hint then
+                    nhints = nhints + 1
+                    cold_hints[nhints] = hint
+                end
             else
                 nbare = nbare + 1
-                bare_needles[nbare] = term
+                bare_needles[nbare] = "\0" .. term .. "\0"
                 bare_lower[nbare] = slower(term)
+                bare_len[nbare] = #term
             end
         end
     end
 
-    return exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, nbare, bare_prefix_needles, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag
+    return exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints
 end
 
-local function entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, nbare, bare_prefix_needles, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag)
-    local set = entry.set
+local function entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag)
+    local raw_blob = entry.raw_blob
     for t = 1, nexact do
-        if not set[exact_needles[t]] then
+        if not sfind(raw_blob, exact_needles[t], 1, true) then
             return false
         end
     end
     for t = 1, nprefix do
-        if not has_prefix(entry, prefix_needles[t]) then
+        if not sfind(raw_blob, prefix_needles[t], 1, true) then
             return false
         end
     end
-    if nbare > 0 then
-        local tset = get_tokens(entry)
-        for t = 1, nbare do
-            if not set[bare_needles[t]] and not tset[bare_lower[t]] then
-                return false
-            end
+    for t = 1, nbare do
+        if not sfind(raw_blob, bare_needles[t], 1, true) and not has_bare_token(entry, bare_lower[t], bare_len[t]) then
+            return false
         end
     end
     for t = 1, nbare_prefix do
-        if not has_prefix(entry, bare_prefix_needles[t]) and not has_token_prefix(entry, bare_prefix_lower[t]) then
+        if not has_bare_prefix(entry, bare_prefix_lower[t]) then
             return false
         end
     end
     for t = 1, nfrag do
-        if not entry_contains_fragment(entry, frag_needles[t], frag_lower[t]) then
+        if not has_fragment(entry, frag_needles[t], frag_lower[t]) then
             return false
         end
     end
@@ -2018,7 +2148,7 @@ function M.filter(bytecodes, terms)
     if nterms == 0 then
         for i = 1, #bytecodes do
             local bc = bytecodes[i]
-            if type(bc) == "string" and #bc > 0 and get_entry(bc) then
+            if type(bc) == "string" and #bc >= 2 and get_entry(bc) then
                 nmatches = nmatches + 1
                 matches[nmatches] = i
             end
@@ -2038,9 +2168,9 @@ function M.filter(bytecodes, terms)
             local lneedle = slower(needle)
             for i = 1, #bytecodes do
                 local bc = bytecodes[i]
-                if type(bc) == "string" and #bc > 0 then
+                if type(bc) == "string" and #bc >= 2 then
                     local entry = get_entry(bc)
-                    if entry and (not non_empty or entry_contains_fragment(entry, needle, lneedle)) then
+                    if entry and (not non_empty or has_fragment(entry, needle, lneedle)) then
                         nmatches = nmatches + 1
                         matches[nmatches] = i
                     end
@@ -2050,11 +2180,18 @@ function M.filter(bytecodes, terms)
             local needle = sub(term, 1, -2)
             local non_empty = #needle > 0
             if sfind(needle, ":", 1, true) then
+                local pneedle = "\0" .. needle
+                local hint = extract_cold_hint(needle, true)
                 for i = 1, #bytecodes do
                     local bc = bytecodes[i]
-                    if type(bc) == "string" and #bc > 0 then
-                        local entry = get_entry(bc)
-                        if entry and (not non_empty or has_prefix(entry, needle)) then
+                    if type(bc) == "string" and #bc >= 2 then
+                        local entry = cache[bc]
+                        if entry == nil then
+                            if not hint or sfind(bc, hint, 1, true) then
+                                entry = parse_and_cache(bc)
+                            end
+                        end
+                        if entry and (not non_empty or sfind(entry.raw_blob, pneedle, 1, true) ~= nil) then
                             nmatches = nmatches + 1
                             matches[nmatches] = i
                         end
@@ -2064,9 +2201,9 @@ function M.filter(bytecodes, terms)
                 local lneedle = slower(needle)
                 for i = 1, #bytecodes do
                     local bc = bytecodes[i]
-                    if type(bc) == "string" and #bc > 0 then
+                    if type(bc) == "string" and #bc >= 2 then
                         local entry = get_entry(bc)
-                        if entry and (not non_empty or has_prefix(entry, needle) or has_token_prefix(entry, lneedle)) then
+                        if entry and (not non_empty or has_bare_prefix(entry, lneedle)) then
                             nmatches = nmatches + 1
                             matches[nmatches] = i
                         end
@@ -2074,23 +2211,32 @@ function M.filter(bytecodes, terms)
                 end
             end
         elseif sfind(term, ":", 1, true) then
+            local eneedle = "\0" .. term .. "\0"
+            local hint = extract_cold_hint(term, false)
             for i = 1, #bytecodes do
                 local bc = bytecodes[i]
-                if type(bc) == "string" and #bc > 0 then
-                    local entry = get_entry(bc)
-                    if entry and entry.set[term] then
+                if type(bc) == "string" and #bc >= 2 then
+                    local entry = cache[bc]
+                    if entry == nil then
+                        if not hint or sfind(bc, hint, 1, true) then
+                            entry = parse_and_cache(bc)
+                        end
+                    end
+                    if entry and sfind(entry.raw_blob, eneedle, 1, true) then
                         nmatches = nmatches + 1
                         matches[nmatches] = i
                     end
                 end
             end
         else
+            local eneedle = "\0" .. term .. "\0"
             local lterm = slower(term)
+            local tlen = #term
             for i = 1, #bytecodes do
                 local bc = bytecodes[i]
-                if type(bc) == "string" and #bc > 0 then
+                if type(bc) == "string" and #bc >= 2 then
                     local entry = get_entry(bc)
-                    if entry and (entry.set[term] or get_tokens(entry)[lterm]) then
+                    if entry and (sfind(entry.raw_blob, eneedle, 1, true) or has_bare_token(entry, lterm, tlen)) then
                         nmatches = nmatches + 1
                         matches[nmatches] = i
                     end
@@ -2101,16 +2247,28 @@ function M.filter(bytecodes, terms)
         return matches
     end
 
-    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, nbare, bare_prefix_needles, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag = compile_terms(terms)
+    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints = compile_terms(terms)
     if not exact_needles then
         return matches
     end
 
     for i = 1, #bytecodes do
         local bc = bytecodes[i]
-        if type(bc) == "string" and #bc > 0 then
-            local entry = get_entry(bc)
-            if entry and entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, nbare, bare_prefix_needles, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag) then
+        if type(bc) == "string" and #bc >= 2 then
+            local entry = cache[bc]
+            if entry == nil then
+                local possible = true
+                for h = 1, nhints do
+                    if not sfind(bc, cold_hints[h], 1, true) then
+                        possible = false
+                        break
+                    end
+                end
+                if possible then
+                    entry = parse_and_cache(bc)
+                end
+            end
+            if entry and entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag) then
                 nmatches = nmatches + 1
                 matches[nmatches] = i
             end
@@ -2132,7 +2290,7 @@ function M.filter_async(bytecodes, terms, budget_ms, yield_fn)
     if nterms == 0 then
         for i = 1, #bytecodes do
             local bc = bytecodes[i]
-            if type(bc) == "string" and #bc > 0 then
+            if type(bc) == "string" and #bc >= 2 then
                 local was_cached = cache[bc] ~= nil
                 if get_entry(bc) then
                     nmatches = nmatches + 1
@@ -2147,21 +2305,34 @@ function M.filter_async(bytecodes, terms, budget_ms, yield_fn)
         return matches
     end
 
-    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, nbare, bare_prefix_needles, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag = compile_terms(terms)
+    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints = compile_terms(terms)
     if not exact_needles then
         return matches
     end
 
     for i = 1, #bytecodes do
         local bc = bytecodes[i]
-        if type(bc) == "string" and #bc > 0 then
-            local was_cached = cache[bc] ~= nil
-            local entry = get_entry(bc)
-            if entry and entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, nbare, bare_prefix_needles, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag) then
+        if type(bc) == "string" and #bc >= 2 then
+            local entry = cache[bc]
+            local did_parse = false
+            if entry == nil then
+                local possible = true
+                for h = 1, nhints do
+                    if not sfind(bc, cold_hints[h], 1, true) then
+                        possible = false
+                        break
+                    end
+                end
+                if possible then
+                    entry = parse_and_cache(bc)
+                    did_parse = true
+                end
+            end
+            if entry and entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag) then
                 nmatches = nmatches + 1
                 matches[nmatches] = i
             end
-            if can_yield and (not was_cached or i % 64 == 0) and (os_clock() - slice_start) >= budget then
+            if can_yield and (did_parse or i % 64 == 0) and (os_clock() - slice_start) >= budget then
                 yfn()
                 slice_start = os_clock()
             end
@@ -2179,8 +2350,8 @@ function M.warmup(bytecodes, budget_ms, yield_fn)
 
     for i = 1, #bytecodes do
         local bc = bytecodes[i]
-        if type(bc) == "string" and #bc > 0 and cache[bc] == nil then
-            get_entry(bc)
+        if type(bc) == "string" and #bc >= 2 and cache[bc] == nil then
+            parse_and_cache(bc)
             if can_yield and (os_clock() - slice_start) >= budget then
                 yfn()
                 slice_start = os_clock()
@@ -2199,8 +2370,85 @@ function M.tokens(bytecode)
     if not entry then
         return false
     end
-    get_tokens(entry)
-    return entry.token_list
+
+    local token_list = entry.token_list
+    if token_list then
+        return token_list
+    end
+
+    local token_set = {}
+    token_list = {}
+    local token_n = 0
+    local list = entry.list
+
+    for i = 1, #list do
+        local pat = list[i]
+        local colon = sfind(pat, ":", 1, true)
+        local val = colon and sub(pat, colon + 1) or pat
+        local vlen = #val
+        if vlen > 0 and vlen <= 4096 then
+            local idx = 1
+            while idx <= vlen do
+                while idx <= vlen and char_kind(byte(val, idx)) < 0 do
+                    idx = idx + 1
+                end
+                if idx > vlen then
+                    break
+                end
+                local seg_start = idx
+                while idx <= vlen and char_kind(byte(val, idx)) >= 0 do
+                    idx = idx + 1
+                end
+                local seg_end = idx - 1
+                local whole = slower(sub(val, seg_start, seg_end))
+                if not token_set[whole] then
+                    token_set[whole] = true
+                    token_n = token_n + 1
+                    token_list[token_n] = whole
+                end
+                if seg_end > seg_start then
+                    local sub_start = seg_start
+                    local prev_k = char_kind(byte(val, seg_start))
+                    for j = seg_start + 1, seg_end do
+                        local k = char_kind(byte(val, j))
+                        local split = false
+                        if k == 0 and prev_k ~= 0 then
+                            split = true
+                        elseif k ~= 0 and prev_k == 0 then
+                            split = true
+                        elseif k == 2 then
+                            if prev_k == 1 then
+                                split = true
+                            elseif prev_k == 2 and j < seg_end and char_kind(byte(val, j + 1)) == 1 then
+                                split = true
+                            end
+                        end
+                        if split then
+                            local part = slower(sub(val, sub_start, j - 1))
+                            if not token_set[part] then
+                                token_set[part] = true
+                                token_n = token_n + 1
+                                token_list[token_n] = part
+                            end
+                            sub_start = j
+                        end
+                        prev_k = k
+                    end
+                    if sub_start > seg_start then
+                        local tail = slower(sub(val, sub_start, seg_end))
+                        if not token_set[tail] then
+                            token_set[tail] = true
+                            token_n = token_n + 1
+                            token_list[token_n] = tail
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    entry.token_list = token_list
+    return token_list
 end
 
 function M.clear()
@@ -2211,6 +2459,6 @@ function M.clear()
     end
 end
 
-M.version = "2.6.0"
+M.version = "2.8.0"
 
 return M
