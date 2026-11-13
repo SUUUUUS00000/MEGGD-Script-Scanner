@@ -2,7 +2,7 @@ local M = {}
 local cache = {}
 
 local OP_LEN = {
-    [0]=1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 2, 1, 1, 2,
+    1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 2, 1, 1, 2,
     2, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2,
     2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1, 1, 1, 2, 1, 2, 1, 1, 2, 1, 2, 1, 1, 1,
@@ -10,28 +10,26 @@ local OP_LEN = {
     2, 1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 1, 2, 2,
 }
 
-local SIMPLE_CLEAR_A = {
-    [4]=true, [5]=true, [9]=true, [13]=true, [17]=true, [19]=true,
-    [33]=true, [34]=true, [35]=true, [36]=true, [37]=true, [38]=true,
-    [39]=true, [40]=true, [41]=true, [42]=true, [43]=true, [44]=true,
-    [45]=true, [46]=true, [47]=true, [48]=true, [49]=true, [50]=true,
-    [51]=true, [52]=true, [53]=true, [54]=true, [64]=true, [66]=true,
-    [71]=true, [72]=true, [81]=true, [82]=true, [90]=true, [91]=true,
-    [93]=true,
-}
+local SIMPLE_CLEAR_A = {}
+for _, op in ipairs({
+    4, 5, 9, 13, 17, 19, 33, 34, 35, 36, 37, 38,
+    39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+    51, 52, 53, 54, 64, 66, 71, 72, 81, 82, 90, 91,
+    93,
+}) do
+    SIMPLE_CLEAR_A[op + 1] = true
+end
 
-local FAST_PATH_OP = {
-    [0]=true, [1]=true, [4]=true, [5]=true, [9]=true, [10]=true,
-    [11]=true, [13]=true, [14]=true, [17]=true, [18]=true, [19]=true,
-    [23]=true, [24]=true, [27]=true, [28]=true, [29]=true, [30]=true,
-    [31]=true, [32]=true, [33]=true, [34]=true, [35]=true, [36]=true,
-    [37]=true, [38]=true, [39]=true, [40]=true, [41]=true, [42]=true,
-    [43]=true, [44]=true, [45]=true, [46]=true, [47]=true, [48]=true,
-    [49]=true, [50]=true, [51]=true, [52]=true, [53]=true, [54]=true,
-    [55]=true, [62]=true, [64]=true, [65]=true, [66]=true, [67]=true,
-    [69]=true, [70]=true, [71]=true, [72]=true, [81]=true, [82]=true,
-    [88]=true, [90]=true, [91]=true, [92]=true, [93]=true, [94]=true,
-}
+local FAST_PATH_OP = {}
+for _, op in ipairs({
+    0, 1, 4, 5, 9, 10, 11, 13, 14, 17, 18, 19,
+    23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+    37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+    49, 50, 51, 52, 53, 54, 55, 62, 64, 65, 66, 67,
+    69, 70, 71, 72, 81, 82, 88, 90, 91, 92, 93, 94,
+}) do
+    FAST_PATH_OP[op + 1] = true
+end
 
 local TAG_STRINGS = {
     [1]="return:void",
@@ -75,43 +73,17 @@ local TAG_STRINGS = {
     [39]="call:xpcall",
 }
 
-local OP_TAG_ID = {
-    [19]=23,
-    [24]=22,
-    [27]=12,
-    [28]=14,
-    [29]=15,
-    [30]=13,
-    [31]=16,
-    [32]=17,
-    [33]=30,
-    [34]=31,
-    [35]=32,
-    [36]=33,
-    [37]=34,
-    [38]=35,
-    [39]=30,
-    [40]=31,
-    [41]=32,
-    [42]=33,
-    [43]=34,
-    [44]=35,
-    [45]=9,
-    [46]=10,
-    [47]=9,
-    [48]=10,
-    [49]=29,
-    [50]=11,
-    [52]=37,
-    [53]=26,
-    [54]=27,
-    [55]=28,
-    [64]=24,
-    [71]=31,
-    [72]=33,
-    [81]=36,
-    [82]=36,
-}
+local OP_TAG_ID = {}
+for op, tid in pairs({
+    [19]=23, [24]=22, [27]=12, [28]=14, [29]=15, [30]=13,
+    [31]=16, [32]=17, [33]=30, [34]=31, [35]=32, [36]=33,
+    [37]=34, [38]=35, [39]=30, [40]=31, [41]=32, [42]=33,
+    [43]=34, [44]=35, [45]=9,  [46]=10, [47]=9,  [48]=10,
+    [49]=29, [50]=11, [52]=37, [53]=26, [54]=27, [55]=28,
+    [64]=24, [71]=31, [72]=33, [81]=36, [82]=36,
+}) do
+    OP_TAG_ID[op + 1] = tid
+end
 
 local BUILTIN_CALLS = {
     [1]="assert", [2]="math.abs", [3]="math.acos", [4]="math.asin",
@@ -160,9 +132,12 @@ for id, name in pairs(BUILTIN_CALLS) do
 end
 
 local TAG_ID_BY_NAME = {}
+local static_parts = {}
 for id, str in pairs(TAG_STRINGS) do
     TAG_ID_BY_NAME[str] = id
+    static_parts[#static_parts + 1] = str
 end
+local STATIC_CI_HAYSTACK = "\0" .. string.lower(table.concat(static_parts, "\0")) .. "\0"
 
 local HINT_TAGS = {
     string = true,
@@ -177,8 +152,11 @@ local HINT_TAGS = {
 }
 
 local ENCODE_OP = {}
+local ENCODE_LEN = {}
 for i = 0, 255 do
-    ENCODE_OP[i] = (i * 203) % 256
+    local dec = (i * 203) % 256
+    ENCODE_OP[i + 1] = dec
+    ENCODE_LEN[i + 1] = OP_LEN[dec + 1] or 0
 end
 
 local byte = string.byte
@@ -209,8 +187,8 @@ local scratch_import_gen = {}
 local scratch_import_paths = {}
 local scratch_import_calls = {}
 local scratch_import_sidx = {}
-local scratch_reg_call = {}
-local scratch_reg_ret = {}
+local scratch_reg_call = tcreate and tcreate(256) or {}
+local scratch_reg_ret = tcreate and tcreate(256) or {}
 local scratch_imp_seen = {}
 local scratch_tag_seen = tcreate and tcreate(240, 0) or {}
 if not tcreate then
@@ -218,7 +196,7 @@ if not tcreate then
         scratch_tag_seen[i] = 0
     end
 end
-local scratch_max_reg = -1
+local scratch_max_reg = 0
 local import_gen_counter = 0
 local script_gen_counter = 0
 
@@ -250,6 +228,23 @@ local function read_u32_array(buf, bp, count, out)
     return bp
 end
 
+@native
+local function skip_local_tail_buf(buf, bp, limit)
+    local b = breadu8(buf, bp)
+    if b < 128 then
+        bp = bp + 1
+    else
+        _, bp = read_varint_tail_buf(buf, bp, limit, b)
+    end
+    b = breadu8(buf, bp)
+    if b < 128 then
+        return bp + 2
+    end
+    local np
+    _, np = read_varint_tail_buf(buf, bp, limit, b)
+    return np + 1
+end
+
 local function read_varint_tail_str(s, pos, b0)
     local result = b0 - 128
     local mul = 128
@@ -266,6 +261,76 @@ local function read_varint_tail_str(s, pos, b0)
         result = result + (b - 128) * mul
         mul = mul * 128
     end
+end
+
+local function get_str_table_slice(bc)
+    local blen = #bc
+    if blen < 4 then
+        return nil
+    end
+    local version = byte(bc, 1)
+    if not version or version < 3 or (version > 14 and version ~= 100) then
+        return nil
+    end
+    local pos = version >= 4 and 3 or 2
+    local str_count = byte(bc, pos)
+    if not str_count then
+        return nil
+    end
+    if str_count < 128 then
+        pos = pos + 1
+    else
+        local result = str_count - 128
+        local mul = 128
+        pos = pos + 1
+        while true do
+            local b = byte(bc, pos)
+            if not b then
+                return nil
+            end
+            pos = pos + 1
+            if b < 128 then
+                str_count = result + b * mul
+                break
+            end
+            result = result + (b - 128) * mul
+            mul = mul * 128
+        end
+    end
+    local str_start = pos
+    for _ = 1, str_count do
+        local slen = byte(bc, pos)
+        if not slen then
+            return nil
+        end
+        if slen < 128 then
+            pos = pos + 1 + slen
+        else
+            local result = slen - 128
+            local mul = 128
+            pos = pos + 1
+            while true do
+                local b = byte(bc, pos)
+                if not b then
+                    return nil
+                end
+                pos = pos + 1
+                if b < 128 then
+                    pos = pos + result + b * mul
+                    break
+                end
+                result = result + (b - 128) * mul
+                mul = mul * 128
+            end
+        end
+        if pos - 1 > blen then
+            return nil
+        end
+    end
+    if pos <= str_start then
+        return ""
+    end
+    return sub(bc, str_start, pos - 1)
 end
 
 local function decode_import(constants, const_sidx, const_count, idx1, active_imp_gen)
@@ -352,12 +417,12 @@ local function is_valid_stream_detect(insns, n)
     local pc = 1
     local certain_plain = false
     while pc <= n do
-        local op = band(insns[pc], 255)
-        local len = OP_LEN[op]
+        local raw = band(insns[pc], 255)
+        local len = OP_LEN[raw + 1]
         if not len or pc + len - 1 > n then
             return false, false
         end
-        if not certain_plain and not OP_LEN[ENCODE_OP[op]] then
+        if not certain_plain and ENCODE_LEN[raw + 1] == 0 then
             certain_plain = true
         end
         pc = pc + len
@@ -369,9 +434,8 @@ end
 local function is_valid_stream_true(insns, n)
     local pc = 1
     while pc <= n do
-        local op = ENCODE_OP[band(insns[pc], 255)]
-        local len = OP_LEN[op]
-        if not len or pc + len - 1 > n then
+        local len = ENCODE_LEN[band(insns[pc], 255) + 1]
+        if len == 0 or pc + len - 1 > n then
             return false
         end
         pc = pc + len
@@ -390,7 +454,7 @@ local function is_andor_jump(pc, insn, total, insns, use_encode)
         local tinsn = insns[target]
         local top = band(tinsn, 255)
         if use_encode then
-            top = ENCODE_OP[top]
+            top = ENCODE_OP[top + 1]
         end
         if top == 3 then
             return rshift(tinsn, 24) ~= 0
@@ -411,7 +475,7 @@ local function is_call_target(pc, len, reg, total, insns, use_encode)
     local ninsn = insns[nxt]
     local nop = band(ninsn, 255)
     if use_encode then
-        nop = ENCODE_OP[nop]
+        nop = ENCODE_OP[nop + 1]
     end
     return (nop == 21 or nop == 87) and band(rshift(ninsn, 8), 255) == reg
 end
@@ -443,13 +507,13 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
 
     local reg_call = scratch_reg_call
     local reg_ret = scratch_reg_ret
-    if scratch_max_reg >= 0 then
-        for r = 0, scratch_max_reg do
+    if scratch_max_reg >= 1 then
+        for r = 1, scratch_max_reg do
             reg_call[r] = nil
             reg_ret[r] = nil
         end
     end
-    scratch_max_reg = 255
+    scratch_max_reg = 256
 
     local active_imp_gen = 0
     if has_imports then
@@ -457,32 +521,34 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
         active_imp_gen = import_gen_counter
     end
 
-    local max_reg = -1
+    local max_reg = 0
     local pc = 1
 
     while pc <= total do
         local insn = insns[pc]
         local op = band(insn, 255)
         if use_encode then
-            op = ENCODE_OP[op]
+            op = ENCODE_OP[op + 1]
         end
-        local len = OP_LEN[op]
+        local op1 = op + 1
+        local len = OP_LEN[op1]
         if not len or pc + len - 1 > total then
             break
         end
 
         local a = band(rshift(insn, 8), 255)
+        local r1 = a + 1
 
-        if FAST_PATH_OP[op] then
-            local tid = OP_TAG_ID[op]
+        if FAST_PATH_OP[op1] then
+            local tid = OP_TAG_ID[op1]
             if tid and tag_seen[tid] ~= script_gen then
                 tag_seen[tid] = script_gen
                 found_n = found_n + 1
                 found[found_n] = TAG_STRINGS[tid]
             end
-            if SIMPLE_CLEAR_A[op] then
-                reg_call[a] = nil
-                reg_ret[a] = nil
+            if SIMPLE_CLEAR_A[op1] then
+                reg_call[r1] = nil
+                reg_ret[r1] = nil
             end
         elseif op == 15 or op == 7 or op == 83 then
             local aux = insns[pc + 1]
@@ -497,16 +563,16 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                         found[found_n] = "get:" .. key
                     end
                 end
-                reg_call[a] = sidx
+                reg_call[r1] = sidx
             else
-                reg_call[a] = nil
+                reg_call[r1] = nil
             end
-            reg_ret[a] = nil
-            if a > max_reg then
-                max_reg = a
+            reg_ret[r1] = nil
+            if r1 > max_reg then
+                max_reg = r1
             end
         elseif op == 21 or op == 87 then
-            local cp = reg_call[a]
+            local cp = reg_call[r1]
             if cp then
                 if type(cp) == "number" then
                     if band(str_flags[cp], 8) == 0 then
@@ -539,23 +605,22 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                     end
                 end
             end
-            local c = rshift(insn, 24)
-            local nres = c - 1
+            local nres = rshift(insn, 24) - 1
             if nres < 0 then
-                for r = a, max_reg do
+                for r = r1, max_reg do
                     reg_call[r] = nil
                     reg_ret[r] = nil
                 end
-                reg_ret[a] = 3
-                if a > max_reg then
-                    max_reg = a
+                reg_ret[r1] = 3
+                if r1 > max_reg then
+                    max_reg = r1
                 end
             elseif nres == 0 then
-                reg_call[a] = nil
-                reg_ret[a] = nil
+                reg_call[r1] = nil
+                reg_ret[r1] = nil
             else
-                local top = a + nres - 1
-                for r = a, top do
+                local top = a + nres
+                for r = r1, top do
                     reg_call[r] = nil
                     reg_ret[r] = 3
                 end
@@ -591,22 +656,23 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                     end
                 end
                 str_flags[sidx] = fl
-                reg_call[a] = sidx
+                reg_call[r1] = sidx
             else
-                reg_call[a] = nil
+                reg_call[r1] = nil
             end
-            reg_call[a + 1] = nil
-            reg_ret[a] = nil
-            reg_ret[a + 1] = nil
-            if a + 1 > max_reg then
-                max_reg = a + 1
+            local r2 = r1 + 1
+            reg_call[r2] = nil
+            reg_ret[r1] = nil
+            reg_ret[r2] = nil
+            if r2 > max_reg then
+                max_reg = r2
             end
         elseif op == 6 then
-            local b = band(rshift(insn, 16), 255)
-            reg_call[a] = reg_call[b]
-            reg_ret[a] = reg_ret[b]
-            if a > max_reg then
-                max_reg = a
+            local rb = band(rshift(insn, 16), 255) + 1
+            reg_call[r1] = reg_call[rb]
+            reg_ret[r1] = reg_ret[rb]
+            if r1 > max_reg then
+                max_reg = r1
             end
         elseif op == 12 then
             local dfield = rshift(insn, 16)
@@ -627,16 +693,16 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                     end
                 end
                 if last_sidx ~= 0 then
-                    reg_call[a] = last_sidx
+                    reg_call[r1] = last_sidx
                 else
-                    reg_call[a] = cpat
+                    reg_call[r1] = cpat
                 end
             else
-                reg_call[a] = nil
+                reg_call[r1] = nil
             end
-            reg_ret[a] = nil
-            if a > max_reg then
-                max_reg = a
+            reg_ret[r1] = nil
+            if r1 > max_reg then
+                max_reg = r1
             end
         elseif op == 16 or op == 8 or op == 84 then
             local aux = insns[pc + 1]
@@ -652,7 +718,7 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
             end
         elseif op == 22 then
             local b = band(rshift(insn, 16), 255)
-            local tid = b == 1 and 1 or (reg_ret[a] or 2)
+            local tid = b == 1 and 1 or (reg_ret[r1] or 2)
             if tag_seen[tid] ~= script_gen then
                 tag_seen[tid] = script_gen
                 found_n = found_n + 1
@@ -685,17 +751,17 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                 found[found_n] = TAG_STRINGS[tid]
             end
         elseif op == 2 then
-            reg_call[a] = nil
-            reg_ret[a] = 4
-            if a > max_reg then
-                max_reg = a
+            reg_call[r1] = nil
+            reg_ret[r1] = 4
+            if r1 > max_reg then
+                max_reg = r1
             end
         elseif op == 3 then
             local b = band(rshift(insn, 16), 255)
-            reg_call[a] = nil
-            reg_ret[a] = b == 0 and 5 or (b == 1 and 6 or nil)
-            if a > max_reg then
-                max_reg = a
+            reg_call[r1] = nil
+            reg_ret[r1] = b == 0 and 5 or (b == 1 and 6 or nil)
+            if r1 > max_reg then
+                max_reg = r1
             end
         elseif op == 68 or op == 73 or op == 74 or op == 75 or op == 60 then
             local tid = 100 + a
@@ -719,7 +785,7 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                 found_n = found_n + 1
                 found[found_n] = TAG_STRINGS[tid]
             end
-            for r = a, a + 3 do
+            for r = r1, r1 + 3 do
                 reg_call[r] = nil
                 reg_ret[r] = nil
             end
@@ -729,18 +795,18 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
                 found_n = found_n + 1
                 found[found_n] = "loop:for-num"
             end
-            reg_call[a + 2] = nil
-            reg_call[a + 3] = nil
-            reg_ret[a + 2] = nil
-            reg_ret[a + 3] = nil
+            reg_call[r1 + 2] = nil
+            reg_call[r1 + 3] = nil
+            reg_ret[r1 + 2] = nil
+            reg_ret[r1 + 3] = nil
         elseif op == 58 then
             if tag_seen[19] ~= script_gen then
                 tag_seen[19] = script_gen
                 found_n = found_n + 1
                 found[found_n] = "loop:for-in"
             end
-            local top = a + 2 + band(insns[pc + 1], 255)
-            for r = a + 2, top do
+            local top = r1 + 2 + band(insns[pc + 1], 255)
+            for r = r1 + 2, top do
                 reg_call[r] = nil
                 reg_ret[r] = nil
             end
@@ -752,13 +818,13 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
             end
             local b = band(rshift(insn, 16), 255)
             if b == 0 then
-                for r = a, max_reg do
+                for r = r1, max_reg do
                     reg_call[r] = nil
                     reg_ret[r] = nil
                 end
             elseif b >= 2 then
-                local top = a + b - 2
-                for r = a, top do
+                local top = a + b - 1
+                for r = r1, top do
                     reg_call[r] = nil
                     reg_ret[r] = nil
                 end
@@ -792,7 +858,7 @@ local function extract_proto(insns, total, constants, const_sidx, const_count, s
     return found_n, encoded_mode
 end
 
-local function parse_and_extract_buf(bytecode, found)
+local function parse_and_extract_buf(bytecode)
     local blen = #bytecode
     local buf = bfrom(bytecode)
     local pos = 0
@@ -871,6 +937,7 @@ local function parse_and_extract_buf(bytecode, found)
         scratch_imp_seen = imp_seen
     end
 
+    local found = tcreate and tcreate(str_count + 24) or {}
     local has_size = version >= 12 or version == 100
     local found_n = 0
     local encoded_mode = nil
@@ -1173,20 +1240,7 @@ local function parse_and_extract_buf(bytecode, found)
                                     found[found_n] = "local:" .. vn
                                 end
                             end
-                            local spc = breadu8(buf, bp)
-                            if spc < 128 then
-                                bp = bp + 1
-                            else
-                                _, bp = read_varint_tail_buf(buf, bp, limit, spc)
-                            end
-                            local epc = breadu8(buf, bp)
-                            if epc < 128 then
-                                bp = bp + 2
-                            else
-                                local np6
-                                _, np6 = read_varint_tail_buf(buf, bp, limit, epc)
-                                bp = np6 + 1
-                            end
+                            bp = skip_local_tail_buf(buf, bp, limit)
                         end
 
                         local uc = breadu8(buf, bp)
@@ -1254,10 +1308,10 @@ local function parse_and_extract_buf(bytecode, found)
         end
     end
 
-    return found_n
+    return found_n, found
 end
 
-local function parse_and_extract_str(bytecode, found)
+local function parse_and_extract_str(bytecode)
     local slen = #bytecode
     local pos = 1
 
@@ -1344,6 +1398,7 @@ local function parse_and_extract_str(bytecode, found)
         scratch_imp_seen = imp_seen
     end
 
+    local found = tcreate and tcreate(str_count + 24) or {}
     local has_size = version >= 12 or version == 100
     local found_n = 0
     local encoded_mode = nil
@@ -1813,7 +1868,7 @@ local function parse_and_extract_str(bytecode, found)
         end
     end
 
-    return found_n
+    return found_n, found
 end
 
 local parse_and_extract = bfrom and parse_and_extract_buf or parse_and_extract_str
@@ -1948,8 +2003,7 @@ local function has_fragment(entry, needle, lneedle)
 end
 
 local function parse_and_cache(bytecode)
-    local found = {}
-    local ok, found_n = pcall(parse_and_extract, bytecode, found)
+    local ok, found_n, found = pcall(parse_and_extract, bytecode)
 
     local entry
     if ok and found_n and found_n > 0 then
@@ -2047,6 +2101,38 @@ local function extract_cold_hint(term, is_prefix)
     return val
 end
 
+local function extract_cold_ci_hint(lneedle)
+    if #lneedle == 0 then
+        return nil
+    end
+    if sfind(STATIC_CI_HAYSTACK, lneedle, 1, true) then
+        return nil
+    end
+    return lneedle
+end
+
+local function passes_cold_filters(bc, cold_hints, nhints, cold_ci_hints, nci)
+    for h = 1, nhints do
+        if not sfind(bc, cold_hints[h], 1, true) then
+            return true, false
+        end
+    end
+    if nci > 0 then
+        local hdr = get_str_table_slice(bc)
+        if not hdr then
+            cache[bc] = false
+            return false, false
+        end
+        local low_hdr = slower(hdr)
+        for h = 1, nci do
+            if not sfind(low_hdr, cold_ci_hints[h], 1, true) then
+                return true, false
+            end
+        end
+    end
+    return true, true
+end
+
 local function compile_terms(terms)
     local nterms = #terms
     local exact_needles = {}
@@ -2058,7 +2144,8 @@ local function compile_terms(terms)
     local frag_needles = {}
     local frag_lower = {}
     local cold_hints = {}
-    local nexact, nprefix, nbare, nbare_prefix, nfrag, nhints = 0, 0, 0, 0, 0, 0
+    local cold_ci_hints = {}
+    local nexact, nprefix, nbare, nbare_prefix, nfrag, nhints, nci = 0, 0, 0, 0, 0, 0, 0
 
     for t = 1, nterms do
         local term = terms[t]
@@ -2069,9 +2156,15 @@ local function compile_terms(terms)
         if sub(term, 1, 1) == "~" then
             local needle = sub(term, 2)
             if #needle > 0 then
+                local lneedle = slower(needle)
                 nfrag = nfrag + 1
                 frag_needles[nfrag] = needle
-                frag_lower[nfrag] = slower(needle)
+                frag_lower[nfrag] = lneedle
+                local ch = extract_cold_ci_hint(lneedle)
+                if ch then
+                    nci = nci + 1
+                    cold_ci_hints[nci] = ch
+                end
             end
         elseif sub(term, -1) == "*" then
             local needle = sub(term, 1, -2)
@@ -2085,8 +2178,14 @@ local function compile_terms(terms)
                         cold_hints[nhints] = hint
                     end
                 else
+                    local lneedle = slower(needle)
                     nbare_prefix = nbare_prefix + 1
-                    bare_prefix_lower[nbare_prefix] = slower(needle)
+                    bare_prefix_lower[nbare_prefix] = lneedle
+                    local ch = extract_cold_ci_hint(lneedle)
+                    if ch then
+                        nci = nci + 1
+                        cold_ci_hints[nci] = ch
+                    end
                 end
             end
         else
@@ -2099,15 +2198,21 @@ local function compile_terms(terms)
                     cold_hints[nhints] = hint
                 end
             else
+                local lterm = slower(term)
                 nbare = nbare + 1
                 bare_needles[nbare] = "\0" .. term .. "\0"
-                bare_lower[nbare] = slower(term)
+                bare_lower[nbare] = lterm
                 bare_len[nbare] = #term
+                local ch = extract_cold_ci_hint(lterm)
+                if ch then
+                    nci = nci + 1
+                    cold_ci_hints[nci] = ch
+                end
             end
         end
     end
 
-    return exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints
+    return exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints, cold_ci_hints, nci
 end
 
 local function entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag)
@@ -2166,10 +2271,23 @@ function M.filter(bytecodes, terms)
             local needle = sub(term, 2)
             local non_empty = #needle > 0
             local lneedle = slower(needle)
+            local ci_hint = non_empty and extract_cold_ci_hint(lneedle) or nil
             for i = 1, #bytecodes do
                 local bc = bytecodes[i]
                 if type(bc) == "string" and #bc >= 2 then
-                    local entry = get_entry(bc)
+                    local entry = cache[bc]
+                    if entry == nil then
+                        if ci_hint then
+                            local hdr = get_str_table_slice(bc)
+                            if not hdr then
+                                cache[bc] = false
+                            elseif sfind(slower(hdr), ci_hint, 1, true) then
+                                entry = parse_and_cache(bc)
+                            end
+                        else
+                            entry = parse_and_cache(bc)
+                        end
+                    end
                     if entry and (not non_empty or has_fragment(entry, needle, lneedle)) then
                         nmatches = nmatches + 1
                         matches[nmatches] = i
@@ -2199,10 +2317,23 @@ function M.filter(bytecodes, terms)
                 end
             else
                 local lneedle = slower(needle)
+                local ci_hint = non_empty and extract_cold_ci_hint(lneedle) or nil
                 for i = 1, #bytecodes do
                     local bc = bytecodes[i]
                     if type(bc) == "string" and #bc >= 2 then
-                        local entry = get_entry(bc)
+                        local entry = cache[bc]
+                        if entry == nil then
+                            if ci_hint then
+                                local hdr = get_str_table_slice(bc)
+                                if not hdr then
+                                    cache[bc] = false
+                                elseif sfind(slower(hdr), ci_hint, 1, true) then
+                                    entry = parse_and_cache(bc)
+                                end
+                            else
+                                entry = parse_and_cache(bc)
+                            end
+                        end
                         if entry and (not non_empty or has_bare_prefix(entry, lneedle)) then
                             nmatches = nmatches + 1
                             matches[nmatches] = i
@@ -2232,10 +2363,23 @@ function M.filter(bytecodes, terms)
             local eneedle = "\0" .. term .. "\0"
             local lterm = slower(term)
             local tlen = #term
+            local ci_hint = extract_cold_ci_hint(lterm)
             for i = 1, #bytecodes do
                 local bc = bytecodes[i]
                 if type(bc) == "string" and #bc >= 2 then
-                    local entry = get_entry(bc)
+                    local entry = cache[bc]
+                    if entry == nil then
+                        if ci_hint then
+                            local hdr = get_str_table_slice(bc)
+                            if not hdr then
+                                cache[bc] = false
+                            elseif sfind(slower(hdr), ci_hint, 1, true) then
+                                entry = parse_and_cache(bc)
+                            end
+                        else
+                            entry = parse_and_cache(bc)
+                        end
+                    end
                     if entry and (sfind(entry.raw_blob, eneedle, 1, true) or has_bare_token(entry, lterm, tlen)) then
                         nmatches = nmatches + 1
                         matches[nmatches] = i
@@ -2247,7 +2391,7 @@ function M.filter(bytecodes, terms)
         return matches
     end
 
-    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints = compile_terms(terms)
+    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints, cold_ci_hints, nci = compile_terms(terms)
     if not exact_needles then
         return matches
     end
@@ -2257,13 +2401,7 @@ function M.filter(bytecodes, terms)
         if type(bc) == "string" and #bc >= 2 then
             local entry = cache[bc]
             if entry == nil then
-                local possible = true
-                for h = 1, nhints do
-                    if not sfind(bc, cold_hints[h], 1, true) then
-                        possible = false
-                        break
-                    end
-                end
+                local _, possible = passes_cold_filters(bc, cold_hints, nhints, cold_ci_hints, nci)
                 if possible then
                     entry = parse_and_cache(bc)
                 end
@@ -2305,7 +2443,7 @@ function M.filter_async(bytecodes, terms, budget_ms, yield_fn)
         return matches
     end
 
-    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints = compile_terms(terms)
+    local exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, nfrag, cold_hints, nhints, cold_ci_hints, nci = compile_terms(terms)
     if not exact_needles then
         return matches
     end
@@ -2316,13 +2454,7 @@ function M.filter_async(bytecodes, terms, budget_ms, yield_fn)
             local entry = cache[bc]
             local did_parse = false
             if entry == nil then
-                local possible = true
-                for h = 1, nhints do
-                    if not sfind(bc, cold_hints[h], 1, true) then
-                        possible = false
-                        break
-                    end
-                end
+                local _, possible = passes_cold_filters(bc, cold_hints, nhints, cold_ci_hints, nci)
                 if possible then
                     entry = parse_and_cache(bc)
                     did_parse = true
@@ -2459,6 +2591,6 @@ function M.clear()
     end
 end
 
-M.version = "2.8.0"
+M.version = "2.9.0"
 
 return M
