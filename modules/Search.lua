@@ -95,18 +95,63 @@ for i = 0, 255 do
 end
 
 local byte, sub, slower, supper, sfind, smatch = string.byte, string.sub, string.lower, string.upper, string.find, string.match
+local sgmatch, sgsub = string.gmatch, string.gsub
 local band, rshift, tclear, tcreate = bit32.band, bit32.rshift, table.clear, table.create
 local os_clock = os and os.clock
 local task_wait = task and task.wait
 
-local scratch_str_off, scratch_str_len, scratch_str_flags = {}, {}, {}
+local scratch_str_off, scratch_str_len = {}, {}
 local scratch_constants, scratch_const_sidx = {}, {}
-local scratch_import_gen, scratch_import_paths, scratch_import_calls, scratch_import_sidx = {}, {}, {}, {}
-local scratch_reg_call, scratch_reg_ret = tcreate(256), tcreate(256)
+local scratch_fs_str, scratch_fs_get, scratch_fs_set, scratch_fs_call = {}, {}, {}, {}
+local scratch_fs_meth, scratch_fs_func, scratch_fs_loc, scratch_fs_upv = {}, {}, {}, {}
+local scratch_reg = tcreate(256)
 local scratch_imp_seen, scratch_tag_seen = {}, tcreate(240, 0)
+local scratch_imp_stamp, scratch_imp_tid = {}, {}
+local scratch_imp_memo, scratch_path_ids = {}, {}
+local scratch_t_path, scratch_t_cpat, scratch_t_lastk, scratch_t_ctid, scratch_t_pid, scratch_t_done = {}, {}, {}, {}, {}, {}
+local scratch_p_imp, scratch_p_get = {}, {}
+local scratch_n_tuples, scratch_n_paths, scratch_dirty = 0, 0, false
 local scratch_max_reg, import_gen_counter, script_gen_counter = 0, 0, 0
 local scratch_blob_cap = 65536
 local scratch_blob_buf = buffer.create(scratch_blob_cap)
+
+local INVALID_STEP = 1073741824
+local IMPBASE = 16777216
+local CLASS_BY_OP = {}
+for op = 0, 94 do CLASS_BY_OP[op] = 0 end
+for _, op in ipairs({4,5,9,13,17,51,66,90,91,93}) do CLASS_BY_OP[op] = 1 end
+for op, tid in pairs({[24]=22,[27]=12,[28]=14,[29]=15,[30]=13,[31]=16,[32]=17,[55]=28}) do CLASS_BY_OP[op] = 100 + tid end
+for op, tid in pairs({
+  [19]=23,[33]=30,[34]=31,[35]=32,[36]=33,[37]=34,[38]=35,[39]=30,[40]=31,[41]=32,[42]=33,[43]=34,[44]=35,
+  [45]=9,[46]=10,[47]=9,[48]=10,[49]=29,[50]=11,[52]=37,[53]=26,[54]=27,[64]=24,[71]=31,[72]=33,[81]=36,[82]=36,
+}) do CLASS_BY_OP[op] = 200 + tid end
+CLASS_BY_OP[15] = 2; CLASS_BY_OP[7] = 2; CLASS_BY_OP[83] = 3
+CLASS_BY_OP[21] = 4; CLASS_BY_OP[87] = 4
+CLASS_BY_OP[6] = 5
+CLASS_BY_OP[12] = 6
+CLASS_BY_OP[20] = 7; CLASS_BY_OP[85] = 8
+CLASS_BY_OP[16] = 9; CLASS_BY_OP[8] = 9; CLASS_BY_OP[84] = 10; CLASS_BY_OP[86] = 11
+CLASS_BY_OP[22] = 12
+CLASS_BY_OP[26] = 13; CLASS_BY_OP[25] = 14
+CLASS_BY_OP[2] = 15; CLASS_BY_OP[3] = 16
+for _, op in ipairs({68,73,74,75,60}) do CLASS_BY_OP[op] = 17 end
+for _, op in ipairs({77,78,79,80}) do CLASS_BY_OP[op] = 18 end
+CLASS_BY_OP[57] = 19; CLASS_BY_OP[58] = 20; CLASS_BY_OP[63] = 21; CLASS_BY_OP[89] = 22
+CLASS_BY_OP[56] = 318; CLASS_BY_OP[59] = 321; CLASS_BY_OP[61] = 320; CLASS_BY_OP[76] = 319
+
+local STEP_P, STEP_E, CLS_P, CLS_E = {}, {}, {}, {}
+for raw = 0, 255 do
+  local sp = OP_STEP[raw + 1]
+  STEP_P[raw] = sp or INVALID_STEP
+  CLS_P[raw] = sp and CLASS_BY_OP[raw] or 0
+  local dec = (raw * 203) % 256
+  local se = OP_STEP[dec + 1]
+  STEP_E[raw] = se or INVALID_STEP
+  CLS_E[raw] = se and CLASS_BY_OP[dec] or 0
+end
+local RAW_ENC = function(op: number): number return (op * 227) % 256 end
+local FASTCALL_TID = {}
+for a = 0, 255 do FASTCALL_TID[a] = TAG_NUL[100 + a] and (100 + a) or 0 end
 
 local function grow_blob(wbuf: buffer, wpos: number, wcap: number, need: number): (buffer, number)
   repeat wcap = wcap * 2 until wcap >= need
@@ -174,15 +219,8 @@ local function get_str_table_slice(bc: string): string?
   return string.sub(bc, str_start, pos - 1)
 end
 
-local function decode_import(buf: buffer, constants: {number}, const_sidx: {number}, const_count: number, str_off: {number}, str_len: {number}, idx1: number, active_imp_gen: number)
-  if idx1 < 1 or idx1 > const_count or const_sidx[idx1] ~= -1 then return nil, nil, 0 end
-  local import_gen, import_paths, import_calls, import_sidx = scratch_import_gen, scratch_import_paths, scratch_import_calls, scratch_import_sidx
-  if import_gen[idx1] == active_imp_gen then
-    local cached = import_paths[idx1]
-    if not cached then return nil, nil, 0 end
-    return cached, import_calls[idx1], import_sidx[idx1]
-  end
-  import_gen[idx1] = active_imp_gen
+local function resolve_import(buf: buffer, constants: {number}, const_sidx: {number}, const_count: number, str_off: {number}, str_len: {number}, str_count: number, idx1: number): number
+  if idx1 < 1 or idx1 > const_count or const_sidx[idx1] ~= -1 then return 0 end
   local iid = constants[idx1]
   local cnt = rshift(iid, 30)
   local k1 = cnt >= 1 and band(rshift(iid, 20), 1023) + 1 or 0
@@ -191,6 +229,21 @@ local function decode_import(buf: buffer, constants: {number}, const_sidx: {numb
   local idx_s1 = (k1 >= 1 and k1 <= const_count) and const_sidx[k1] or 0
   local idx_s2 = (k2 >= 1 and k2 <= const_count) and const_sidx[k2] or 0
   local idx_s3 = (k3 >= 1 and k3 <= const_count) and const_sidx[k3] or 0
+  if idx_s1 < 0 then idx_s1 = 0 end
+  if idx_s2 < 0 then idx_s2 = 0 end
+  if idx_s3 < 0 then idx_s3 = 0 end
+
+  local memo = scratch_imp_memo
+  local key
+  local b = str_count + 1
+  if str_count < 200000 and idx_s1 < b and idx_s2 < b and idx_s3 < b then
+    key = (idx_s1 * b + idx_s2) * b + idx_s3
+  else
+    key = idx_s1 .. ":" .. idx_s2 .. ":" .. idx_s3
+  end
+  local id = memo[key]
+  if id then return id end
+
   local breadstring = buffer.readstring
   local s1 = idx_s1 > 0 and breadstring(buf, str_off[idx_s1], str_len[idx_s1]) or nil
   local s2 = idx_s2 > 0 and breadstring(buf, str_off[idx_s2], str_len[idx_s2]) or nil
@@ -201,12 +254,22 @@ local function decode_import(buf: buffer, constants: {number}, const_sidx: {numb
   elseif s1 and s3 then path, last, last_k = s1 .. "." .. s3, s3, idx_s3
   elseif s2 and s3 then path, last, last_k = s2 .. "." .. s3, s3, idx_s3
   else path = s1 or s2 or s3; last = path; last_k = (s1 and idx_s1) or (s2 and idx_s2) or idx_s3 end
-  if not path then import_paths[idx1] = false; return nil, nil, 0 end
+  if not path then memo[key] = 0; return 0 end
+
   local short = smatch(last, "([^.]+)$") or last
   local call_pat = "call:" .. short
-  local last_sidx = short == last and last_k or 0
-  import_paths[idx1], import_calls[idx1], import_sidx[idx1] = path, call_pat, last_sidx
-  return path, call_pat, last_sidx
+  id = scratch_n_tuples + 1
+  scratch_n_tuples = id
+  scratch_t_path[id] = path
+  scratch_t_cpat[id] = call_pat
+  scratch_t_lastk[id] = short == last and last_k or 0
+  scratch_t_ctid[id] = TAG_ID_BY_NAME[call_pat] or false
+  local pids = scratch_path_ids
+  local pid = pids[path]
+  if not pid then pid = scratch_n_paths + 1; scratch_n_paths = pid; pids[path] = pid end
+  scratch_t_pid[id] = pid
+  memo[key] = id
+  return id
 end
 
 local function read_varint_tail_buf(buf: buffer, pos: number, len: number, b0: number): (number, number)
@@ -249,312 +312,15 @@ local function is_valid_stream_true_buf(buf: buffer, insn_base: number, insn_end
   return true
 end
 
+local RAW_CALL1_E, RAW_CALL2_E, RAW_LOADB_E, RAW_MOVE_E = (21 * 227) % 256, (87 * 227) % 256, (3 * 227) % 256, (6 * 227) % 256
+
 @native
-local function extract_proto_buf(buf: buffer, insn_base: number, insn_end: number, constants: {number}, const_sidx: {number}, const_count: number, str_off: {number}, str_len: {number}, str_flags: {number}, has_imports: boolean, encoded_mode: boolean?, tag_seen: {number}, script_gen: number, imp_seen: {[string]: boolean}, wbuf: buffer, wpos: number, wcap: number)
-  if insn_base >= insn_end then return wbuf, wpos, wcap, encoded_mode end
-
-  local breadu8, breadu16, breadi16, breadu32, breadstring = buffer.readu8, buffer.readu16, buffer.readi16, buffer.readu32, buffer.readstring
-  local bcopy, bwriteu8, bwriteu32, bwritestring, band_fn = buffer.copy, buffer.writeu8, buffer.writeu32, buffer.writestring, bit32.band
-
-  local use_encode: boolean
-  if encoded_mode == true then
-    use_encode = true
-  elseif encoded_mode == false then
-    use_encode = false
-  else
-    local valid, certain_plain = is_valid_stream_detect_buf(buf, insn_base, insn_end)
-    if valid then
-      use_encode = false
-      if certain_plain then encoded_mode = false end
-    elseif is_valid_stream_true_buf(buf, insn_base, insn_end) then
-      use_encode = true
-      encoded_mode = true
-    else
-      return wbuf, wpos, wcap, encoded_mode
-    end
-  end
-
-  local reg_call, reg_ret = scratch_reg_call, scratch_reg_ret
-  if scratch_max_reg >= 1 then
-    for r = 1, scratch_max_reg do reg_call[r] = nil; reg_ret[r] = nil end
-  end
-  scratch_max_reg = 256
-
-  local active_imp_gen = 0
-  if has_imports then
-    import_gen_counter = import_gen_counter + 1
-    active_imp_gen = import_gen_counter
-  end
-
-  local max_reg, off = 0, insn_base
-
-  while off < insn_end do
-    local op = breadu8(buf, off)
-    if use_encode then op = ENCODE_OP[op + 1] end
-    local op1 = op + 1
-    local step = OP_STEP[op1]
-    if not step then break end
-    local nxt_off = off + step
-    if nxt_off > insn_end then break end
-
-    local emit_tid = 0
-    local f = OP_FAST[op1]
-    if f ~= 0 then
-      if f == 1 then
-      elseif f == 2 then
-        local r1 = breadu8(buf, off + 1) + 1
-        reg_call[r1] = nil; reg_ret[r1] = nil
-      elseif f < 100 then
-        emit_tid = f
-      else
-        emit_tid = f - 100
-        local r1 = breadu8(buf, off + 1) + 1
-        reg_call[r1] = nil; reg_ret[r1] = nil
-      end
-    elseif op == 15 or op == 7 or op == 83 then
-      local a = breadu8(buf, off + 1)
-      local r1 = a + 1
-      local idx1 = (op == 83 and breadu16(buf, off + 4) or breadu32(buf, off + 4)) + 1
-      local sidx = idx1 <= const_count and const_sidx[idx1] or 0
-      if sidx > 0 and str_len[sidx] > 0 then
-        local slen, is_call = str_len[sidx], false
-        if nxt_off < insn_end then
-          local nop = breadu8(buf, nxt_off)
-          if use_encode then nop = ENCODE_OP[nop + 1] end
-          if (nop == 21 or nop == 87) and breadu8(buf, nxt_off + 1) == a then is_call = true end
-        end
-        if not is_call and band_fn(str_flags[sidx], 2) == 0 then
-          str_flags[sidx] = str_flags[sidx] + 2
-          local need = wpos + 5 + slen
-          if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-          bwriteu32(wbuf, wpos, 0x3A746567); bcopy(wbuf, wpos + 4, buf, str_off[sidx], slen); bwriteu8(wbuf, wpos + 4 + slen, 0)
-          wpos = need
-        end
-        reg_call[r1] = sidx
-      else
-        reg_call[r1] = nil
-      end
-      reg_ret[r1] = nil
-      if r1 > max_reg then max_reg = r1 end
-    elseif op == 21 or op == 87 then
-      local a = breadu8(buf, off + 1)
-      local r1 = a + 1
-      local cp = reg_call[r1]
-      if cp then
-        if type(cp) == "number" then
-          if band_fn(str_flags[cp], 8) == 0 then
-            str_flags[cp] = str_flags[cp] + 8
-            local slen, soff = str_len[cp], str_off[cp]
-            local st_id = (slen >= 4 and slen <= 12 and BUILTIN_B0_MAP[breadu8(buf, soff)]) and BUILTIN_RAW_ID[breadstring(buf, soff, slen)] or nil
-            if st_id then
-              emit_tid = st_id
-            else
-              local need = wpos + 6 + slen
-              if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-              bwriteu32(wbuf, wpos, 0x6C6C6163); bwriteu8(wbuf, wpos + 4, 0x3A); bcopy(wbuf, wpos + 5, buf, soff, slen); bwriteu8(wbuf, wpos + 5 + slen, 0)
-              wpos = need
-            end
-          end
-        else
-          local st_id = TAG_ID_BY_NAME[cp]
-          if st_id then
-            emit_tid = st_id
-          elseif not imp_seen[cp] then
-            imp_seen[cp] = true
-            local clen = #cp
-            local need = wpos + clen + 1
-            if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-            bwritestring(wbuf, wpos, cp); bwriteu8(wbuf, wpos + clen, 0)
-            wpos = need
-          end
-        end
-      end
-      local nres = breadu8(buf, off + 3) - 1
-      if nres < 0 then
-        for r = r1, max_reg do reg_call[r] = nil; reg_ret[r] = nil end
-        reg_ret[r1] = 3
-        if r1 > max_reg then max_reg = r1 end
-      elseif nres == 0 then
-        reg_call[r1] = nil; reg_ret[r1] = nil
-      else
-        local top = a + nres
-        for r = r1, top do reg_call[r] = nil; reg_ret[r] = 3 end
-        if top > max_reg then max_reg = top end
-      end
-    elseif op == 20 or op == 85 then
-      local r1 = breadu8(buf, off + 1) + 1
-      local idx1 = (op == 20 and breadu32(buf, off + 4) or breadu16(buf, off + 4)) + 1
-      local sidx = idx1 <= const_count and const_sidx[idx1] or 0
-      if sidx > 0 and str_len[sidx] > 0 then
-        local slen, soff, fl = str_len[sidx], str_off[sidx], str_flags[sidx]
-        if band_fn(fl, 16) == 0 then
-          fl = fl + 16
-          local need = wpos + 8 + slen
-          if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-          bwriteu32(wbuf, wpos, 0x6874656D); bwriteu32(wbuf, wpos + 4, 0x003A646F); bcopy(wbuf, wpos + 7, buf, soff, slen); bwriteu8(wbuf, wpos + 7 + slen, 0)
-          wpos = need
-        end
-        if band_fn(fl, 8) == 0 then
-          fl = fl + 8
-          local st_id = (slen >= 4 and slen <= 12 and BUILTIN_B0_MAP[breadu8(buf, soff)]) and BUILTIN_RAW_ID[breadstring(buf, soff, slen)] or nil
-          if st_id then
-            emit_tid = st_id
-          else
-            local need = wpos + 6 + slen
-            if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-            bwriteu32(wbuf, wpos, 0x6C6C6163); bwriteu8(wbuf, wpos + 4, 0x3A); bcopy(wbuf, wpos + 5, buf, soff, slen); bwriteu8(wbuf, wpos + 5 + slen, 0)
-            wpos = need
-          end
-        end
-        str_flags[sidx] = fl
-        reg_call[r1] = sidx
-      else
-        reg_call[r1] = nil
-      end
-      local r2 = r1 + 1
-      reg_call[r2] = nil; reg_ret[r1] = nil; reg_ret[r2] = nil
-      if r2 > max_reg then max_reg = r2 end
-    elseif op == 6 then
-      local r1, rb = breadu8(buf, off + 1) + 1, breadu8(buf, off + 2) + 1
-      reg_call[r1] = reg_call[rb]; reg_ret[r1] = reg_ret[rb]
-      if r1 > max_reg then max_reg = r1 end
-    elseif op == 12 then
-      local a = breadu8(buf, off + 1)
-      local r1 = a + 1
-      local path, cpat, last_sidx = decode_import(buf, constants, const_sidx, const_count, str_off, str_len, breadu16(buf, off + 2) + 1, active_imp_gen)
-      if path then
-        local plen, ipat = #path, "import:" .. path
-        if not imp_seen[ipat] then
-          imp_seen[ipat] = true
-          local need = wpos + 8 + plen
-          if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-          bwriteu32(wbuf, wpos, 0x6F706D69); bwriteu32(wbuf, wpos + 4, 0x003A7472); bwritestring(wbuf, wpos + 7, path); bwriteu8(wbuf, wpos + 7 + plen, 0)
-          wpos = need
-        end
-        local is_call = false
-        if nxt_off < insn_end then
-          local nop = breadu8(buf, nxt_off)
-          if use_encode then nop = ENCODE_OP[nop + 1] end
-          if (nop == 21 or nop == 87) and breadu8(buf, nxt_off + 1) == a then is_call = true end
-        end
-        if not is_call then
-          local gpat = "get:" .. path
-          if not imp_seen[gpat] then
-            imp_seen[gpat] = true
-            local need = wpos + 5 + plen
-            if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-            bwriteu32(wbuf, wpos, 0x3A746567); bwritestring(wbuf, wpos + 4, path); bwriteu8(wbuf, wpos + 4 + plen, 0)
-            wpos = need
-          end
-        end
-        reg_call[r1] = last_sidx ~= 0 and last_sidx or cpat
-      else
-        reg_call[r1] = nil
-      end
-      reg_ret[r1] = nil
-      if r1 > max_reg then max_reg = r1 end
-    elseif op == 16 or op == 8 or op == 84 then
-      local idx1 = (op == 84 and breadu16(buf, off + 4) or breadu32(buf, off + 4)) + 1
-      local sidx = idx1 <= const_count and const_sidx[idx1] or 0
-      if sidx > 0 and str_len[sidx] > 0 and band_fn(str_flags[sidx], 4) == 0 then
-        local slen = str_len[sidx]
-        str_flags[sidx] = str_flags[sidx] + 4
-        local need = wpos + 5 + slen
-        if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-        bwriteu32(wbuf, wpos, 0x3A746573); bcopy(wbuf, wpos + 4, buf, str_off[sidx], slen); bwriteu8(wbuf, wpos + 4 + slen, 0)
-        wpos = need
-      end
-    elseif op == 22 then
-      emit_tid = breadu8(buf, off + 2) == 1 and 1 or (reg_ret[breadu8(buf, off + 1) + 1] or 2)
-    elseif op == 26 or op == 25 then
-      local is_andor, target_off = false, off + 4 + breadi16(buf, off + 2) * 4
-      if target_off >= insn_base and target_off < insn_end then
-        local top = breadu8(buf, target_off)
-        if use_encode then top = ENCODE_OP[top + 1] end
-        if top == 3 then is_andor = breadu8(buf, target_off + 3) ~= 0 elseif top == 6 then is_andor = true end
-      end
-      if op == 26 then
-        if is_andor then
-          emit_tid = 9
-        else
-          if tag_seen[8] ~= script_gen then
-            tag_seen[8] = script_gen
-            local need = wpos + TAG_NLEN[8]
-            if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-            bwritestring(wbuf, wpos, TAG_NUL[8]); wpos = need
-          end
-          emit_tid = 7
-        end
-      else
-        emit_tid = is_andor and 10 or 7
-      end
-    elseif op == 2 then
-      local r1 = breadu8(buf, off + 1) + 1
-      reg_call[r1] = nil; reg_ret[r1] = 4
-      if r1 > max_reg then max_reg = r1 end
-    elseif op == 3 then
-      local r1, b = breadu8(buf, off + 1) + 1, breadu8(buf, off + 2)
-      reg_call[r1] = nil; reg_ret[r1] = b == 0 and 5 or (b == 1 and 6 or nil)
-      if r1 > max_reg then max_reg = r1 end
-    elseif op == 68 or op == 73 or op == 74 or op == 75 or op == 60 then
-      local tid = 100 + breadu8(buf, off + 1)
-      if TAG_NUL[tid] then emit_tid = tid end
-    elseif op == 77 or op == 78 or op == 79 or op == 80 then
-      emit_tid = breadu8(buf, off + 7) >= 128 and 13 or 12
-    elseif op == 56 or op == 59 or op == 61 or op == 76 then
-      local r1 = breadu8(buf, off + 1) + 1
-      emit_tid = op == 56 and 18 or (op == 61 and 20 or (op == 59 and 21 or 19))
-      for r = r1, r1 + 3 do reg_call[r] = nil; reg_ret[r] = nil end
-    elseif op == 57 then
-      local r1 = breadu8(buf, off + 1) + 1
-      emit_tid = 18
-      reg_call[r1 + 2] = nil; reg_call[r1 + 3] = nil; reg_ret[r1 + 2] = nil; reg_ret[r1 + 3] = nil
-    elseif op == 58 then
-      local r1 = breadu8(buf, off + 1) + 1
-      emit_tid = 19
-      for r = r1 + 2, r1 + 2 + breadu8(buf, off + 4) do reg_call[r] = nil; reg_ret[r] = nil end
-    elseif op == 63 then
-      local a = breadu8(buf, off + 1)
-      local r1, b = a + 1, breadu8(buf, off + 2)
-      emit_tid = 25
-      if b == 0 then
-        for r = r1, max_reg do reg_call[r] = nil; reg_ret[r] = nil end
-      elseif b >= 2 then
-        for r = r1, a + b - 1 do reg_call[r] = nil; reg_ret[r] = nil end
-      end
-    elseif op == 86 and breadu8(buf, off + 2) == 0 then
-      local idx1 = breadu32(buf, off + 4) + 1
-      local sidx = idx1 <= const_count and const_sidx[idx1] or 0
-      if sidx > 0 and str_len[sidx] > 0 and band_fn(str_flags[sidx], 4) == 0 then
-        local slen = str_len[sidx]
-        str_flags[sidx] = str_flags[sidx] + 4
-        local need = wpos + 5 + slen
-        if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-        bwriteu32(wbuf, wpos, 0x3A746573); bcopy(wbuf, wpos + 4, buf, str_off[sidx], slen); bwriteu8(wbuf, wpos + 4 + slen, 0)
-        wpos = need
-      end
-    elseif op == 89 then
-      local a = breadu8(buf, off + 1)
-      if a == 0 then emit_tid = 38 elseif a == 1 then emit_tid = 39 end
-    end
-
-    if emit_tid ~= 0 and tag_seen[emit_tid] ~= script_gen then
-      tag_seen[emit_tid] = script_gen
-      local need = wpos + TAG_NLEN[emit_tid]
-      if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
-      bwritestring(wbuf, wpos, TAG_NUL[emit_tid]); wpos = need
-    end
-
-    off = nxt_off
-  end
-
-  scratch_max_reg = max_reg
-  return wbuf, wpos, wcap, encoded_mode
-end
-
 local function parse_and_extract(bytecode: string): string?
-  local bfrom, bcopy, breadu8, breadu32, breadstring = buffer.fromstring, buffer.copy, buffer.readu8, buffer.readu32, buffer.readstring
-  local bwriteu8, bwriteu16, bwriteu32, band_fn, rshift_fn = buffer.writeu8, buffer.writeu16, buffer.writeu32, bit32.band, bit32.rshift
+  local bfrom, bcopy, breadu8, breadu16, breadi16, breadu32, breadstring = buffer.fromstring, buffer.copy, buffer.readu8, buffer.readu16, buffer.readi16, buffer.readu32, buffer.readstring
+  local bwriteu8, bwriteu16, bwriteu32, bwritestring = buffer.writeu8, buffer.writeu16, buffer.writeu32, buffer.writestring
+  local rshift_fn = rshift
+  local _ = 0
+  local TAG_NUL, TAG_NLEN, BUILTIN_B0_MAP, BUILTIN_RAW_ID, FASTCALL_TID = TAG_NUL, TAG_NLEN, BUILTIN_B0_MAP, BUILTIN_RAW_ID, FASTCALL_TID
 
   local blen = #bytecode
   local buf = bfrom(bytecode)
@@ -570,12 +336,12 @@ local function parse_and_extract(bytecode: string): string?
   local str_count = breadu8(buf, pos)
   if str_count < 128 then pos = pos + 1 else str_count, pos = read_varint_tail_buf(buf, pos, blen, str_count) end
 
-  local str_off, str_len, str_flags = scratch_str_off, scratch_str_len, scratch_str_flags
+  local str_off, str_len = scratch_str_off, scratch_str_len
   for i = 1, str_count do
     local slen = breadu8(buf, pos)
     if slen < 128 then pos = pos + 1 else slen, pos = read_varint_tail_buf(buf, pos, blen, slen) end
     if pos + slen > blen then error("eof") end
-    str_off[i] = pos; str_len[i] = slen; str_flags[i] = 0; pos = pos + slen
+    str_off[i] = pos; str_len[i] = slen; pos = pos + slen
   end
 
   if typesversion == 3 then
@@ -594,7 +360,11 @@ local function parse_and_extract(bytecode: string): string?
   script_gen_counter = script_gen_counter + 1
   local script_gen = script_gen_counter
   local tag_seen, imp_seen = scratch_tag_seen, scratch_imp_seen
-  tclear(imp_seen)
+  if scratch_dirty then
+    tclear(imp_seen); tclear(scratch_imp_memo); tclear(scratch_path_ids)
+    scratch_dirty = false
+  end
+  scratch_n_tuples = 0; scratch_n_paths = 0
 
   local wbuf, wcap = scratch_blob_buf, scratch_blob_cap
   bwriteu8(wbuf, 0, 0)
@@ -603,6 +373,12 @@ local function parse_and_extract(bytecode: string): string?
   local has_size = version >= 12 or version == 100
   local encoded_mode, max_const, any_imports = nil, 0, false
   local constants, const_sidx = scratch_constants, scratch_const_sidx
+  local fs_str, fs_get, fs_set, fs_call = scratch_fs_str, scratch_fs_get, scratch_fs_set, scratch_fs_call
+  local fs_meth, fs_func, fs_loc, fs_upv = scratch_fs_meth, scratch_fs_func, scratch_fs_loc, scratch_fs_upv
+  local reg = scratch_reg
+  local imp_stamp, imp_tid = scratch_imp_stamp, scratch_imp_tid
+  local t_path, t_cpat, t_lastk, t_ctid, t_pid, t_done = scratch_t_path, scratch_t_cpat, scratch_t_lastk, scratch_t_ctid, scratch_t_pid, scratch_t_done
+  local p_imp, p_get = scratch_p_imp, scratch_p_get
 
   for _ = 1, proto_count do
     local blob_end
@@ -642,9 +418,9 @@ local function parse_and_extract(bytecode: string): string?
         if sidx < 128 then bp = bp + 1 else sidx, bp = read_varint_tail_buf(buf, bp, limit, sidx) end
         if sidx >= 1 and sidx <= str_count then
           const_sidx[ci] = sidx
-          if band_fn(str_flags[sidx], 1) == 0 and str_len[sidx] > 0 then
-            local slen = str_len[sidx]
-            str_flags[sidx] = str_flags[sidx] + 1
+          local slen = str_len[sidx]
+          if slen > 0 and fs_str[sidx] ~= script_gen then
+            fs_str[sidx] = script_gen
             local need = wpos + 8 + slen
             if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
             bwriteu32(wbuf, wpos, 0x69727473); bwriteu32(wbuf, wpos + 4, 0x003A676E)
@@ -687,7 +463,322 @@ local function parse_and_extract(bytecode: string): string?
       else broken_const = true; break end
     end
 
-    wbuf, wpos, wcap, encoded_mode = extract_proto_buf(buf, insn_base, insn_end, constants, const_sidx, const_count, str_off, str_len, str_flags, has_imports, encoded_mode, tag_seen, script_gen, imp_seen, wbuf, wpos, wcap)
+    if insn_base < insn_end then
+      local use_encode = false
+      local run = true
+      if encoded_mode == true then
+        use_encode = true
+      elseif encoded_mode == false then
+        use_encode = false
+      else
+        local valid, certain_plain = is_valid_stream_detect_buf(buf, insn_base, insn_end)
+        if valid then
+          use_encode = false
+          if certain_plain then encoded_mode = false end
+        elseif is_valid_stream_true_buf(buf, insn_base, insn_end) then
+          use_encode = true
+          encoded_mode = true
+        else
+          run = false
+        end
+      end
+
+      if run then
+        if scratch_max_reg >= 1 then
+          for r = 1, scratch_max_reg do reg[r] = nil end
+        end
+        scratch_max_reg = 256
+
+        local STEP, CLS, RAW_CALL1, RAW_CALL2, RAW_LOADB, RAW_MOVE = STEP_P, CLS_P, 21, 87, 3, 6
+        if use_encode then STEP, CLS, RAW_CALL1, RAW_CALL2, RAW_LOADB, RAW_MOVE = STEP_E, CLS_E, RAW_CALL1_E, RAW_CALL2_E, RAW_LOADB_E, RAW_MOVE_E end
+
+        if broken_const then has_imports = true end
+
+        local active_imp_gen = 0
+        if has_imports then
+          import_gen_counter = import_gen_counter + 1
+          active_imp_gen = import_gen_counter
+          scratch_dirty = true
+        end
+
+        local max_reg, off = 0, insn_base
+
+        while off < insn_end do
+          local raw = breadu8(buf, off)
+          local nxt = off + STEP[raw]
+          if nxt > insn_end then break end
+          local c = CLS[raw]
+          if c ~= 0 then
+            if c == 1 then
+              reg[breadu8(buf, off + 1) + 1] = nil
+            else
+              local tid = 0
+              if c < 100 then
+                if c < 4 then
+                  local a = breadu8(buf, off + 1)
+                  local r1 = a + 1
+                  local idx1 = (c == 2 and breadu32(buf, off + 4) or breadu16(buf, off + 4)) + 1
+                  local sidx = idx1 <= const_count and const_sidx[idx1] or 0
+                  if sidx > 0 and str_len[sidx] > 0 then
+                    if fs_get[sidx] ~= script_gen then
+                      local is_call = false
+                      if nxt < insn_end then
+                        local w = breadu16(buf, nxt)
+                        local ca = a * 256
+                        if w == RAW_CALL1 + ca or w == RAW_CALL2 + ca then is_call = true end
+                      end
+                      if not is_call then
+                        fs_get[sidx] = script_gen
+                        local slen = str_len[sidx]
+                        local need = wpos + 5 + slen
+                        if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                        bwriteu32(wbuf, wpos, 0x3A746567); bcopy(wbuf, wpos + 4, buf, str_off[sidx], slen); bwriteu8(wbuf, wpos + 4 + slen, 0)
+                        wpos = need
+                      end
+                    end
+                    reg[r1] = sidx
+                  else
+                    reg[r1] = nil
+                  end
+                  if r1 > max_reg then max_reg = r1 end
+                elseif c == 4 then
+                  local a = breadu8(buf, off + 1)
+                  local r1 = a + 1
+                  local cp = reg[r1]
+                  if cp and cp > 0 then
+                    if cp < IMPBASE then
+                      if fs_call[cp] ~= script_gen then
+                        fs_call[cp] = script_gen
+                        local slen, soff = str_len[cp], str_off[cp]
+                        local st_id = (slen >= 4 and slen <= 12 and BUILTIN_B0_MAP[breadu8(buf, soff)]) and BUILTIN_RAW_ID[breadstring(buf, soff, slen)] or nil
+                        if st_id then
+                          tid = st_id
+                        else
+                          local need = wpos + 6 + slen
+                          if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                          bwriteu32(wbuf, wpos, 0x6C6C6163); bwriteu8(wbuf, wpos + 4, 0x3A); bcopy(wbuf, wpos + 5, buf, soff, slen); bwriteu8(wbuf, wpos + 5 + slen, 0)
+                          wpos = need
+                        end
+                      end
+                    else
+                      local id = cp - IMPBASE
+                      if t_done[id] ~= script_gen then
+                        t_done[id] = script_gen
+                        local st_id = t_ctid[id]
+                        if st_id then
+                          tid = st_id
+                        else
+                          local cpat = t_cpat[id]
+                          if not imp_seen[cpat] then
+                            imp_seen[cpat] = true
+                            local clen = #cpat
+                            local need = wpos + clen + 1
+                            if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                            bwritestring(wbuf, wpos, cpat); bwriteu8(wbuf, wpos + clen, 0)
+                            wpos = need
+                          end
+                        end
+                      end
+                    end
+                  end
+                  local nres = breadu8(buf, off + 3) - 1
+                  if nres < 0 then
+                    for r = r1, max_reg do reg[r] = nil end
+                    reg[r1] = -3
+                    if r1 > max_reg then max_reg = r1 end
+                  elseif nres == 0 then
+                    reg[r1] = nil
+                  else
+                    local top = a + nres
+                    for r = r1, top do reg[r] = -3 end
+                    if top > max_reg then max_reg = top end
+                  end
+                elseif c == 5 then
+                  local r1 = breadu8(buf, off + 1) + 1
+                  reg[r1] = reg[breadu8(buf, off + 2) + 1]
+                  if r1 > max_reg then max_reg = r1 end
+                elseif c == 6 then
+                  local a = breadu8(buf, off + 1)
+                  local r1 = a + 1
+                  local id = 0
+                  if has_imports then
+                    local idx1 = breadu16(buf, off + 2) + 1
+                    if imp_stamp[idx1] == active_imp_gen then
+                      id = imp_tid[idx1]
+                    else
+                      imp_stamp[idx1] = active_imp_gen
+                      id = resolve_import(buf, constants, const_sidx, const_count, str_off, str_len, str_count, idx1)
+                      imp_tid[idx1] = id
+                    end
+                  end
+                  if id ~= 0 then
+                    local pid = t_pid[id]
+                    if p_imp[pid] ~= script_gen then
+                      p_imp[pid] = script_gen
+                      local path = t_path[id]
+                      local plen = #path
+                      local need = wpos + 8 + plen
+                      if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                      bwriteu32(wbuf, wpos, 0x6F706D69); bwriteu32(wbuf, wpos + 4, 0x003A7472); bwritestring(wbuf, wpos + 7, path); bwriteu8(wbuf, wpos + 7 + plen, 0)
+                      wpos = need
+                    end
+                    if p_get[pid] ~= script_gen then
+                      local is_call = false
+                      if nxt < insn_end then
+                        local w = breadu16(buf, nxt)
+                        local ca = a * 256
+                        if w == RAW_CALL1 + ca or w == RAW_CALL2 + ca then is_call = true end
+                      end
+                      if not is_call then
+                        p_get[pid] = script_gen
+                        local path = t_path[id]
+                        local plen = #path
+                        local need = wpos + 5 + plen
+                        if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                        bwriteu32(wbuf, wpos, 0x3A746567); bwritestring(wbuf, wpos + 4, path); bwriteu8(wbuf, wpos + 4 + plen, 0)
+                        wpos = need
+                      end
+                    end
+                    local lk = t_lastk[id]
+                    reg[r1] = lk ~= 0 and lk or (IMPBASE + id)
+                  else
+                    reg[r1] = nil
+                  end
+                  if r1 > max_reg then max_reg = r1 end
+                elseif c < 9 then
+                  local r1 = breadu8(buf, off + 1) + 1
+                  local idx1 = (c == 7 and breadu32(buf, off + 4) or breadu16(buf, off + 4)) + 1
+                  local sidx = idx1 <= const_count and const_sidx[idx1] or 0
+                  if sidx > 0 and str_len[sidx] > 0 then
+                    local slen, soff = str_len[sidx], str_off[sidx]
+                    if fs_meth[sidx] ~= script_gen then
+                      fs_meth[sidx] = script_gen
+                      local need = wpos + 8 + slen
+                      if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                      bwriteu32(wbuf, wpos, 0x6874656D); bwriteu32(wbuf, wpos + 4, 0x003A646F); bcopy(wbuf, wpos + 7, buf, soff, slen); bwriteu8(wbuf, wpos + 7 + slen, 0)
+                      wpos = need
+                    end
+                    if fs_call[sidx] ~= script_gen then
+                      fs_call[sidx] = script_gen
+                      local st_id = (slen >= 4 and slen <= 12 and BUILTIN_B0_MAP[breadu8(buf, soff)]) and BUILTIN_RAW_ID[breadstring(buf, soff, slen)] or nil
+                      if st_id then
+                        tid = st_id
+                      else
+                        local need = wpos + 6 + slen
+                        if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                        bwriteu32(wbuf, wpos, 0x6C6C6163); bwriteu8(wbuf, wpos + 4, 0x3A); bcopy(wbuf, wpos + 5, buf, soff, slen); bwriteu8(wbuf, wpos + 5 + slen, 0)
+                        wpos = need
+                      end
+                    end
+                    reg[r1] = sidx
+                  else
+                    reg[r1] = nil
+                  end
+                  local r2 = r1 + 1
+                  reg[r2] = nil
+                  if r2 > max_reg then max_reg = r2 end
+                elseif c < 12 then
+                  if c ~= 11 or breadu8(buf, off + 2) == 0 then
+                    local idx1 = (c == 10 and breadu16(buf, off + 4) or breadu32(buf, off + 4)) + 1
+                    local sidx = idx1 <= const_count and const_sidx[idx1] or 0
+                    if sidx > 0 and fs_set[sidx] ~= script_gen then
+                      local slen = str_len[sidx]
+                      if slen > 0 then
+                        fs_set[sidx] = script_gen
+                        local need = wpos + 5 + slen
+                        if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                        bwriteu32(wbuf, wpos, 0x3A746573); bcopy(wbuf, wpos + 4, buf, str_off[sidx], slen); bwriteu8(wbuf, wpos + 4 + slen, 0)
+                        wpos = need
+                      end
+                    end
+                  end
+                elseif c == 12 then
+                  if breadu8(buf, off + 2) == 1 then
+                    tid = 1
+                  else
+                    local v = reg[breadu8(buf, off + 1) + 1]
+                    tid = (v and v < 0) and -v or 2
+                  end
+                elseif c < 15 then
+                  local is_andor = false
+                  local target_off = off + 4 + breadi16(buf, off + 2) * 4
+                  if target_off >= insn_base and target_off < insn_end then
+                    local top = breadu8(buf, target_off)
+                    if top == RAW_LOADB then is_andor = breadu8(buf, target_off + 3) ~= 0 elseif top == RAW_MOVE then is_andor = true end
+                  end
+                  if c == 13 then
+                    if is_andor then
+                      tid = 9
+                    else
+                      if tag_seen[8] ~= script_gen then
+                        tag_seen[8] = script_gen
+                        local need = wpos + TAG_NLEN[8]
+                        if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                        bwritestring(wbuf, wpos, TAG_NUL[8]); wpos = need
+                      end
+                      tid = 7
+                    end
+                  else
+                    tid = is_andor and 10 or 7
+                  end
+                elseif c == 15 then
+                  local r1 = breadu8(buf, off + 1) + 1
+                  reg[r1] = -4
+                  if r1 > max_reg then max_reg = r1 end
+                elseif c == 16 then
+                  local r1, b = breadu8(buf, off + 1) + 1, breadu8(buf, off + 2)
+                  reg[r1] = b == 0 and -5 or (b == 1 and -6 or nil)
+                  if r1 > max_reg then max_reg = r1 end
+                elseif c == 17 then
+                  tid = FASTCALL_TID[breadu8(buf, off + 1)]
+                elseif c == 18 then
+                  tid = breadu8(buf, off + 7) >= 128 and 13 or 12
+                elseif c == 19 then
+                  local r1 = breadu8(buf, off + 1) + 1
+                  tid = 18
+                  reg[r1 + 2] = nil; reg[r1 + 3] = nil
+                elseif c == 20 then
+                  local r1 = breadu8(buf, off + 1) + 1
+                  tid = 19
+                  for r = r1 + 2, r1 + 2 + breadu8(buf, off + 4) do reg[r] = nil end
+                elseif c == 21 then
+                  local a = breadu8(buf, off + 1)
+                  local r1, b = a + 1, breadu8(buf, off + 2)
+                  tid = 25
+                  if b == 0 then
+                    for r = r1, max_reg do reg[r] = nil end
+                  elseif b >= 2 then
+                    for r = r1, a + b - 1 do reg[r] = nil end
+                  end
+                else
+                  local a = breadu8(buf, off + 1)
+                  if a == 0 then tid = 38 elseif a == 1 then tid = 39 end
+                end
+              elseif c < 200 then
+                tid = c - 100
+              elseif c < 300 then
+                tid = c - 200
+                reg[breadu8(buf, off + 1) + 1] = nil
+              else
+                tid = c - 300
+                local r1 = breadu8(buf, off + 1) + 1
+                reg[r1] = nil; reg[r1 + 1] = nil; reg[r1 + 2] = nil; reg[r1 + 3] = nil
+              end
+
+              if tid ~= 0 and tag_seen[tid] ~= script_gen then
+                tag_seen[tid] = script_gen
+                local need = wpos + TAG_NLEN[tid]
+                if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
+                bwritestring(wbuf, wpos, TAG_NUL[tid]); wpos = need
+              end
+            end
+          end
+          off = nxt
+        end
+
+        scratch_max_reg = max_reg
+      end
+    end
 
     if broken_const then
       if blob_end then pos = blob_end else break end
@@ -699,9 +790,9 @@ local function parse_and_extract(bytecode: string): string?
 
         local ld = breadu8(buf, bp); if ld < 128 then bp = bp + 1 else _, bp = read_varint_tail_buf(buf, bp, limit, ld) end
         local didx = breadu8(buf, bp); if didx < 128 then bp = bp + 1 else didx, bp = read_varint_tail_buf(buf, bp, limit, didx) end
-        if didx >= 1 and didx <= str_count and band_fn(str_flags[didx], 32) == 0 and str_len[didx] > 0 then
+        if didx >= 1 and didx <= str_count and fs_func[didx] ~= script_gen and str_len[didx] > 0 then
           local slen = str_len[didx]
-          str_flags[didx] = str_flags[didx] + 32
+          fs_func[didx] = script_gen
           local need = wpos + 6 + slen
           if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
           bwriteu32(wbuf, wpos, 0x636E7566); bwriteu8(wbuf, wpos + 4, 0x3A); bcopy(wbuf, wpos + 5, buf, str_off[didx], slen); bwriteu8(wbuf, wpos + 5 + slen, 0)
@@ -728,9 +819,9 @@ local function parse_and_extract(bytecode: string): string?
             local lc = breadu8(buf, bp); if lc < 128 then bp = bp + 1 else lc, bp = read_varint_tail_buf(buf, bp, limit, lc) end
             for _ = 1, lc do
               local vidx = breadu8(buf, bp); if vidx < 128 then bp = bp + 1 else vidx, bp = read_varint_tail_buf(buf, bp, limit, vidx) end
-              if vidx >= 1 and vidx <= str_count and band_fn(str_flags[vidx], 64) == 0 and str_len[vidx] > 0 then
+              if vidx >= 1 and vidx <= str_count and fs_loc[vidx] ~= script_gen and str_len[vidx] > 0 then
                 local slen = str_len[vidx]
-                str_flags[vidx] = str_flags[vidx] + 64
+                fs_loc[vidx] = script_gen
                 local need = wpos + 7 + slen
                 if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
                 bwriteu32(wbuf, wpos, 0x61636F6C); bwriteu16(wbuf, wpos + 4, 0x3A6C); bcopy(wbuf, wpos + 6, buf, str_off[vidx], slen); bwriteu8(wbuf, wpos + 6 + slen, 0)
@@ -746,9 +837,9 @@ local function parse_and_extract(bytecode: string): string?
               local uc = breadu8(buf, bp); if uc < 128 then bp = bp + 1 else uc, bp = read_varint_tail_buf(buf, bp, limit, uc) end
               for _ = 1, uc do
                 local uidx = breadu8(buf, bp); if uidx < 128 then bp = bp + 1 else uidx, bp = read_varint_tail_buf(buf, bp, limit, uidx) end
-                if uidx >= 1 and uidx <= str_count and band_fn(str_flags[uidx], 128) == 0 and str_len[uidx] > 0 then
+                if uidx >= 1 and uidx <= str_count and fs_upv[uidx] ~= script_gen and str_len[uidx] > 0 then
                   local slen = str_len[uidx]
-                  str_flags[uidx] = str_flags[uidx] + 128
+                  fs_upv[uidx] = script_gen
                   local need = wpos + 7 + slen
                   if need > wcap then wbuf, wcap = grow_blob(wbuf, wpos, wcap, need) end
                   bwriteu32(wbuf, wpos, 0x61767075); bwriteu16(wbuf, wpos + 4, 0x3A6C); bcopy(wbuf, wpos + 6, buf, str_off[uidx], slen); bwriteu8(wbuf, wpos + 6 + slen, 0)
@@ -772,11 +863,6 @@ local function parse_and_extract(bytecode: string): string?
         pos = bp
       end
     end
-  end
-
-  if any_imports then
-    local ipaths, icalls = scratch_import_paths, scratch_import_calls
-    for i = 1, max_const do ipaths[i] = nil; icalls[i] = nil end
   end
 
   scratch_blob_buf = wbuf; scratch_blob_cap = wcap
@@ -961,6 +1047,40 @@ local function passes_cold_filters(bc, cold_hints, nhints, cold_ci_hints, cold_c
   return true
 end
 
+local function entry_words(entry)
+  local list = entry.list
+  if list then return list end
+  list = {}
+  local rb, n, p = entry.raw_blob, 0, 2
+  local rlen = #rb
+  while p < rlen do
+    local nxt = sfind(rb, "\0", p, true)
+    if not nxt then break end
+    if nxt > p then n = n + 1; list[n] = sub(rb, p, nxt - 1) end
+    p = nxt + 1
+  end
+  entry.list = list
+  return list
+end
+
+local query_serial = 0
+
+local function entry_has_word(entry, term, eneedle)
+  local set = entry.set
+  if set == nil then
+    local q = entry.q
+    if q == nil or q == query_serial then
+      entry.q = query_serial
+      return sfind(entry.raw_blob, eneedle, 1, true) ~= nil
+    end
+    set = {}
+    local list = entry_words(entry)
+    for i = 1, #list do set[list[i]] = true end
+    entry.set = set
+  end
+  return set[term] == true
+end
+
 local function compile_terms(terms)
   local nterms = #terms
   local exact_needles, prefix_needles, bare_needles, bare_lower, bare_len, bare_prefix_lower = {}, {}, {}, {}, {}, {}
@@ -1010,13 +1130,31 @@ local function compile_terms(terms)
   end
 
   if nexact > 1 then table.sort(exact_needles, function(a, b) return #a > #b end) end
+  if nexact > 0 then
+    local et, eok = {}, {}
+    for t = 1, nexact do
+      local tm = sub(exact_needles[t], 2, -2)
+      et[t] = tm; eok[t] = not sfind(tm, "\0", 1, true)
+    end
+    exact_needles.terms = et; exact_needles.ok = eok
+  end
 
   return exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, frag_alpha, nfrag, cold_hints, nhints, cold_ci_hints, cold_ci_titles, nci
 end
 
 local function entry_matches(entry, exact_needles, nexact, prefix_needles, nprefix, bare_needles, bare_lower, bare_len, nbare, bare_prefix_lower, nbare_prefix, frag_needles, frag_lower, frag_alpha, nfrag)
   local raw_blob = entry.raw_blob
-  for t = 1, nexact do if not sfind(raw_blob, exact_needles[t], 1, true) then return false end end
+  if nexact > 0 then
+    local et, eok = exact_needles.terms, exact_needles.ok
+    for t = 1, nexact do
+      local nd = exact_needles[t]
+      if eok[t] then
+        if not entry_has_word(entry, et[t], nd) then return false end
+      elseif not sfind(raw_blob, nd, 1, true) then
+        return false
+      end
+    end
+  end
   for t = 1, nprefix do if not sfind(raw_blob, prefix_needles[t], 1, true) then return false end end
   local low_blob = entry.low_blob
   for t = 1, nbare do
@@ -1049,6 +1187,7 @@ local function entry_matches(entry, exact_needles, nexact, prefix_needles, npref
 end
 
 function M.filter(bytecodes, terms)
+  query_serial = query_serial + 1
   local find_fn, lower_fn = string.find, string.lower
   local nterms, matches, nmatches = #terms, {}, 0
 
@@ -1130,12 +1269,20 @@ function M.filter(bytecodes, terms)
       end
     elseif find_fn(term, ":", 1, true) then
       local eneedle, hint = "\0" .. term .. "\0", extract_cold_hint(term, false)
+      local plain_ok = not find_fn(term, "\0", 1, true)
       for i = 1, #bytecodes do
         local bc = bytecodes[i]
         if type(bc) == "string" and #bc >= 2 then
           local entry = cache[bc]
           if entry == nil and (not hint or find_fn(bc, hint, 1, true)) then entry = parse_and_cache(bc) end
-          if entry and find_fn(entry.raw_blob, eneedle, 1, true) then nmatches = nmatches + 1; matches[nmatches] = i end
+          if entry then
+            local set = entry.set
+            local hit
+            if set and plain_ok then hit = set[term] == true
+            elseif plain_ok then hit = entry_has_word(entry, term, eneedle)
+            else hit = find_fn(entry.raw_blob, eneedle, 1, true) ~= nil end
+            if hit then nmatches = nmatches + 1; matches[nmatches] = i end
+          end
         end
       end
     else
@@ -1182,6 +1329,7 @@ function M.filter(bytecodes, terms)
 end
 
 function M.filter_async(bytecodes, terms, budget_ms, yield_fn)
+  query_serial = query_serial + 1
   local nterms, matches, nmatches = #terms, {}, 0
   local yfn, budget = yield_fn or task_wait, (budget_ms or 4) * 0.001
   local can_yield = os_clock ~= nil and yfn ~= nil
@@ -1233,19 +1381,51 @@ end
 function M.words(bytecode)
   local entry = get_entry(bytecode)
   if not entry then return false end
-  local list = entry.list
-  if list then return list end
-  list = {}
-  local rb, n, p = entry.raw_blob, 0, 2
-  local rlen = #rb
-  while p < rlen do
-    local nxt = sfind(rb, "\0", p, true)
-    if not nxt then break end
-    if nxt > p then n = n + 1; list[n] = sub(rb, p, nxt - 1) end
-    p = nxt + 1
+  return entry_words(entry)
+end
+
+local tok_memo, tok_memo_n = {}, 0
+local TOK_MEMO_MAX, TOK_MEMO_KEY_MAX = 60000, 96
+
+local KIND = {}
+for b = 0, 255 do KIND[b] = (b >= 97 and b <= 122) and 1 or ((b >= 65 and b <= 90) and 2 or ((b >= 48 and b <= 57) and 0 or -1)) end
+
+local function word_tokens(pat)
+  local out, n = {}, 0
+  local colon = sfind(pat, ":", 1, true)
+  local base = colon or 0
+  local len = #pat
+  local vlen = len - base
+  if vlen > 0 and vlen <= 4096 then
+    local lw = slower(pat)
+    local idx = base + 1
+    while idx <= len do
+      local k0 = KIND[byte(pat, idx)]
+      if k0 < 0 then
+        idx = idx + 1
+      else
+        local seg_start = idx
+        idx = idx + 1
+        while idx <= len and KIND[byte(pat, idx)] >= 0 do idx = idx + 1 end
+        local seg_end = idx - 1
+        n = n + 1; out[n] = sub(lw, seg_start, seg_end)
+        if seg_end > seg_start then
+          local sub_start, prev_k = seg_start, k0
+          for j = seg_start + 1, seg_end do
+            local k = KIND[byte(pat, j)]
+            if (k == 0 and prev_k ~= 0) or (k ~= 0 and prev_k == 0) or (k == 2 and (prev_k == 1 or (prev_k == 2 and j < seg_end and KIND[byte(pat, j + 1)] == 1))) then
+              n = n + 1; out[n] = sub(lw, sub_start, j - 1)
+              sub_start = j
+            end
+            prev_k = k
+          end
+          if sub_start > seg_start then n = n + 1; out[n] = sub(lw, sub_start, seg_end) end
+        end
+      end
+    end
   end
-  entry.list = list
-  return list
+  if len <= TOK_MEMO_KEY_MAX and tok_memo_n < TOK_MEMO_MAX then tok_memo[pat] = out; tok_memo_n = tok_memo_n + 1 end
+  return out
 end
 
 function M.tokens(bytecode)
@@ -1253,41 +1433,14 @@ function M.tokens(bytecode)
   if not entry then return false end
   local token_list = entry.token_list
   if token_list then return token_list end
-  local list, token_set, token_n = M.words(bytecode), {}, 0
+  local list, token_set, token_n = entry_words(entry), {}, 0
   token_list = {}
   for i = 1, #list do
     local pat = list[i]
-    local colon = sfind(pat, ":", 1, true)
-    local val = colon and sub(pat, colon + 1) or pat
-    local vlen = #val
-    if vlen > 0 and vlen <= 4096 then
-      local idx = 1
-      while idx <= vlen do
-        while idx <= vlen and char_kind(byte(val, idx)) < 0 do idx = idx + 1 end
-        if idx > vlen then break end
-        local seg_start = idx
-        while idx <= vlen and char_kind(byte(val, idx)) >= 0 do idx = idx + 1 end
-        local seg_end = idx - 1
-        local whole = slower(sub(val, seg_start, seg_end))
-        if not token_set[whole] then token_set[whole] = true; token_n = token_n + 1; token_list[token_n] = whole end
-        if seg_end > seg_start then
-          local sub_start, prev_k = seg_start, char_kind(byte(val, seg_start))
-          for j = seg_start + 1, seg_end do
-            local k = char_kind(byte(val, j))
-            local split = (k == 0 and prev_k ~= 0) or (k ~= 0 and prev_k == 0) or (k == 2 and (prev_k == 1 or (prev_k == 2 and j < seg_end and char_kind(byte(val, j + 1)) == 1)))
-            if split then
-              local part = slower(sub(val, sub_start, j - 1))
-              if not token_set[part] then token_set[part] = true; token_n = token_n + 1; token_list[token_n] = part end
-              sub_start = j
-            end
-            prev_k = k
-          end
-          if sub_start > seg_start then
-            local tail = slower(sub(val, sub_start, seg_end))
-            if not token_set[tail] then token_set[tail] = true; token_n = token_n + 1; token_list[token_n] = tail end
-          end
-        end
-      end
+    local wt = tok_memo[pat] or word_tokens(pat)
+    for j = 1, #wt do
+      local tok = wt[j]
+      if not token_set[tok] then token_set[tok] = true; token_n = token_n + 1; token_list[token_n] = tok end
     end
   end
   entry.token_list = token_list
@@ -1297,8 +1450,10 @@ end
 function M.clear()
   tclear(cache)
   tclear(hdr_cache)
+  tclear(tok_memo)
+  tok_memo_n = 0
 end
 
-M.version = "4.0.0"
+M.version = "4.5.0"
 
 return M
